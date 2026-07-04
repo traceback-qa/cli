@@ -1,0 +1,346 @@
+/**
+ * Tests command — browse, select, and run tests from the CLI.
+ *
+ * Supports two run modes:
+ *   - Cloud: runs on the server's headless browser (default)
+ *   - Local: launches Chrome on the user's machine, connects via CDP tunnel,
+ *            and the backend agent controls the user's browser remotely
+ */
+
+import type { Command } from 'commander';
+import type { getContext as GetContextFn } from '../../cli.js';
+
+type ContextGetter = typeof GetContextFn;
+
+interface Test {
+  id: string;
+  name: string;
+  goal?: string;
+  platform?: string;
+  status?: string;
+}
+
+export function registerTestCommands(program: Command, getContext: ContextGetter): void {
+  program
+    .command('tests')
+    .description('Browse and run tests')
+    .action(async function (this: Command) {
+      const ctx = getContext(this);
+      if (!ctx) return;
+
+      const isAuth = await ctx.infra.auth.isAuthenticated();
+      if (!isAuth) {
+        ctx.infra.ui.warn('Not authenticated. Run `traceback login` first.');
+        return;
+      }
+
+      const config = await ctx.infra.config.loadGlobalConfig();
+      const workspaceId = config.workspaceId;
+      if (!workspaceId) {
+        ctx.infra.ui.warn('No workspace selected. Run `traceback workspaces` first.');
+        return;
+      }
+
+      // Step 1: Ask what type of tests to browse
+      const { select } = await import('@inquirer/prompts');
+      const platform = await select({
+        message: 'What type of tests?',
+        choices: [
+          { name: '🌐  Web tests', value: 'web' },
+          { name: '📱  Mobile tests', value: 'mobile' },
+        ],
+      });
+
+      // Step 2: Fetch tests from the backend
+      const spinner = ctx.infra.ui.spinner('Fetching tests...');
+      let tests: Test[];
+      try {
+        const result = await ctx.infra.api.get<Test[]>(
+          `/workspaces/${workspaceId}/tests`,
+        );
+        tests = (result.data || []).filter((t) => {
+          if ((t.platform || 'web') !== platform) return false;
+          return true;
+        });
+        spinner.stop();
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          spinner.fail('Workspace not found (404)');
+          ctx.infra.ui.warn('The configured workspace might have been deleted.');
+          ctx.infra.ui.hint('Run `traceback workspaces` to select a valid workspace.');
+          return;
+        }
+        spinner.fail('Failed to fetch tests');
+        throw error;
+      }
+
+      if (!tests.length) {
+        ctx.infra.ui.warn(`No ${platform} tests found in this workspace.`);
+        return;
+      }
+
+      // Step 3: Let the user pick a test
+      const testId = await select({
+        message: `Select a ${platform} test`,
+        choices: tests.map((t) => ({
+          name: `${t.name}${t.goal ? `  —  ${t.goal.slice(0, 50)}` : ''}`,
+          value: t.id,
+        })),
+      });
+
+      const selected = tests.find((t) => t.id === testId);
+      if (!selected) return;
+
+      // Step 4: Ask what to do with the selected test
+      if (platform === 'mobile') {
+        // ── Mobile: detect devices, let user pick one ──
+        await handleMobileTest(ctx, workspaceId, testId, selected);
+      } else {
+        // ── Web: cloud or local Chrome ──
+        const action = await select({
+          message: `${selected.name}`,
+          choices: [
+            { name: '▶  Run in cloud', value: 'cloud' },
+            { name: '💻  Run locally (opens Chrome)', value: 'local' },
+            { name: '📋  View details', value: 'details' },
+          ],
+        });
+
+        if (action === 'cloud') {
+          await runInCloud(ctx, workspaceId, testId, selected.name);
+        } else if (action === 'local') {
+          await runLocally(ctx, workspaceId, testId, selected.name);
+        } else if (action === 'details') {
+          showDetails(ctx, selected);
+        }
+      }
+    });
+}
+
+/**
+ * Run a test in the cloud (server-side headless browser).
+ */
+async function runInCloud(ctx: any, workspaceId: string, testId: string, testName: string): Promise<void> {
+  const spinner = ctx.infra.ui.spinner(`Starting cloud run for "${testName}"...`);
+  try {
+    const result = await ctx.infra.api.post<{ run_id: string }>(
+      `/workspaces/${workspaceId}/tests/${testId}/run`,
+      { environment: 'production', viewport: 'desktop' },
+    );
+    spinner.succeed(`Run started: ${result.data.run_id}`);
+    ctx.infra.ui.hint('View results at traceback.dev or use `traceback runs`');
+  } catch (error) {
+    spinner.fail('Failed to start run');
+    throw error;
+  }
+}
+
+/**
+ * Run a test locally by launching Chrome and connecting via CDP tunnel.
+ *
+ * Flow:
+ *   1. Launch Chrome with --remote-debugging-port=9222
+ *   2. Get the CDP WebSocket URL from Chrome
+ *   3. Connect a WebSocket tunnel to the backend
+ *   4. Advertise the CDP URL through the tunnel
+ *   5. Dispatch the test run with the tunnel_id
+ *   6. The backend worker connects to our Chrome and runs the test
+ *   7. User watches it happen live in their Chrome window
+ *   8. Clean up: close tunnel and Chrome when done
+ */
+async function runLocally(ctx: any, workspaceId: string, testId: string, testName: string): Promise<void> {
+  const { launchChrome } = await import('../../infrastructure/browser/chrome.launcher.js');
+  const { connectTunnel } = await import('../../infrastructure/tunnel/tunnel.client.js');
+
+  // Step 1: Launch Chrome with CDP enabled
+  const chromeSpinner = ctx.infra.ui.spinner('Launching Chrome...');
+  let chrome;
+  try {
+    chrome = await launchChrome();
+    chromeSpinner.succeed(`Chrome launched (CDP: ${chrome.cdpUrl.slice(0, 40)}...)`);
+  } catch (error: any) {
+    chromeSpinner.fail(`Failed to launch Chrome: ${error.message}`);
+    return;
+  }
+
+  // Step 2: Connect tunnel to backend and advertise the CDP URL
+  const tunnelSpinner = ctx.infra.ui.spinner('Connecting tunnel...');
+  let tunnel;
+  try {
+    const token = await ctx.infra.auth.getToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const config = await ctx.infra.config.loadGlobalConfig();
+    tunnel = await connectTunnel(config.apiUrl, token.accessToken, chrome.cdpUrl);
+    tunnelSpinner.succeed(`Tunnel connected (${tunnel.tunnelId.slice(0, 12)}...)`);
+  } catch (error: any) {
+    tunnelSpinner.fail(`Tunnel failed: ${error.message}`);
+    chrome.kill();
+    return;
+  }
+
+  // Step 3: Dispatch the test run with the tunnel_id
+  const runSpinner = ctx.infra.ui.spinner(`Running "${testName}" locally...`);
+  try {
+    const result = await ctx.infra.api.post<{ run_id: string }>(
+      `/workspaces/${workspaceId}/tests/${testId}/run`,
+      {
+        environment: 'production',
+        viewport: 'desktop',
+        tunnel_id: tunnel.tunnelId,
+      },
+    );
+    runSpinner.succeed(`Run started: ${result.data.run_id}`);
+    ctx.infra.ui.info('Watch the test run in your Chrome window.');
+    ctx.infra.ui.hint('Press Ctrl+C to stop.');
+
+    // Keep the process alive while the test runs.
+    // The backend controls Chrome via CDP through our tunnel.
+    await new Promise<void>((resolve) => {
+      process.on('SIGINT', () => {
+        ctx.infra.ui.info('\nStopping...');
+        resolve();
+      });
+      // Auto-resolve after 5 minutes (safety timeout)
+      setTimeout(resolve, 300_000);
+    });
+  } catch (error) {
+    runSpinner.fail('Failed to start local run');
+    throw error;
+  } finally {
+    // Step 4: Clean up — close tunnel and Chrome
+    tunnel.close();
+    chrome.kill();
+    ctx.infra.ui.info('Chrome and tunnel closed.');
+  }
+}
+
+/**
+ * Show test details in the terminal.
+ */
+function showDetails(ctx: any, test: Test): void {
+  ctx.infra.ui.info(`\n  Name:      ${test.name}`);
+  ctx.infra.ui.info(`  ID:        ${test.id}`);
+  ctx.infra.ui.info(`  Platform:  ${test.platform || 'web'}`);
+  ctx.infra.ui.info(`  Status:    ${test.status || 'active'}`);
+  if (test.goal) {
+    ctx.infra.ui.info(`  Goal:      ${test.goal}`);
+  }
+}
+
+/**
+ * Handle mobile test selection — detect running emulators/simulators
+ * and let the user pick one to run the test on.
+ *
+ * Flow:
+ *   1. Scan for running Android emulators (adb) and iOS simulators (xcrun)
+ *   2. Show the list for user to select
+ *   3. Dispatch the run with the selected device info
+ */
+async function handleMobileTest(ctx: any, workspaceId: string, testId: string, test: Test): Promise<void> {
+  const { select } = await import('@inquirer/prompts');
+  const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+
+  const action = await select({
+    message: `${test.name}`,
+    choices: [
+      { name: '📱  Run on device/emulator', value: 'device' },
+      { name: '☁️  Run in cloud', value: 'cloud' },
+      { name: '📋  View details', value: 'details' },
+    ],
+  });
+
+  if (action === 'details') {
+    showDetails(ctx, test);
+    return;
+  }
+
+  if (action === 'cloud') {
+    await runInCloud(ctx, workspaceId, testId, test.name);
+    return;
+  }
+
+  // Detect running devices/emulators
+  const deviceSpinner = ctx.infra.ui.spinner('Scanning for devices...');
+  const devices = detectDevices();
+  deviceSpinner.stop();
+
+  if (!devices.length) {
+    ctx.infra.ui.warn('No running emulators or simulators found.');
+    ctx.infra.ui.hint('Start an Android emulator or iOS simulator and try again.');
+    ctx.infra.ui.hint('  Android: `emulator -avd <name>` or open Android Studio');
+    ctx.infra.ui.hint('  iOS:     `open -a Simulator` or open Xcode');
+    return;
+  }
+
+  // Let user pick a device
+  const deviceId = await select({
+    message: 'Select a device',
+    choices: devices.map((d) => ({
+      name: `${d.platform === 'ios' ? '🍎' : '🤖'}  ${d.name}  (${d.id.slice(0, 12)}...)`,
+      value: d.id,
+    })),
+  });
+
+  const device = devices.find((d) => d.id === deviceId);
+  if (!device) return;
+
+  // Step 1: Start Appium bridge — creates Appium session + Socket.IO connection
+  // The bridge attaches to whatever app is currently open on the device.
+  const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
+
+  const bridgeSpinner = ctx.infra.ui.spinner(`Connecting to ${device.name} via Appium...`);
+  let bridge;
+  try {
+    const token = await ctx.infra.auth.getToken();
+    if (!token) throw new Error('Not authenticated');
+
+    const config = await ctx.infra.config.loadGlobalConfig();
+    bridge = await startAppiumBridge({
+      apiBaseUrl: config.apiUrl,
+      authToken: token.accessToken,
+      deviceId: device.id,
+      platform: device.platform,
+      deviceName: device.name,
+    });
+    bridgeSpinner.succeed(`Connected to ${device.name} (session: ${bridge.sessionId.slice(0, 12)}...)`);
+  } catch (error: any) {
+    bridgeSpinner.fail(`Failed to connect: ${error.message}`);
+    ctx.infra.ui.hint('Make sure Appium is running: `appium`');
+    return;
+  }
+
+  // Step 2: Dispatch the test run with the session_id.
+  // The backend's mobile agent will send commands via Socket.IO,
+  // and our bridge relays them to the device via Appium.
+  const runSpinner = ctx.infra.ui.spinner(`Running "${test.name}" on ${device.name}...`);
+  try {
+    const result = await ctx.infra.api.post<{ run_id: string }>(
+      `/workspaces/${workspaceId}/tests/${testId}/run`,
+      {
+        environment: 'production',
+        viewport: 'phone',
+        session_id: bridge.sessionId,
+      },
+    );
+    runSpinner.succeed(`Run started: ${result.data.run_id}`);
+    ctx.infra.ui.info('Watch the test run on your device/emulator.');
+    ctx.infra.ui.hint('Press Ctrl+C to stop.');
+
+    // Keep alive while the agent controls the device
+    await new Promise<void>((resolve) => {
+      process.on('SIGINT', () => {
+        ctx.infra.ui.info('\nStopping...');
+        resolve();
+      });
+      setTimeout(resolve, 300_000);
+    });
+  } catch (error) {
+    runSpinner.fail('Failed to start mobile run');
+    throw error;
+  } finally {
+    // Clean up Appium session and Socket.IO connection
+    await bridge.close();
+    ctx.infra.ui.info('Appium session closed.');
+  }
+}
