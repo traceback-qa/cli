@@ -11,27 +11,27 @@ export function createProjectService(deps: ProjectServiceDeps): ProjectService {
   return {
     async list() {
       deps.logger.debug('Listing projects');
-      return endpoints.list() as Promise<unknown[]>;
+      return await (endpoints.list() as Promise<unknown[]>);
     },
 
     async get(id: string) {
       deps.logger.debug(`Getting project: ${id}`);
-      return endpoints.get(id);
+      return await endpoints.get(id);
     },
 
     async create(input) {
       deps.logger.debug('Creating project');
-      return endpoints.create(input as unknown as CreateProjectInput);
+      return await endpoints.create(input as unknown as CreateProjectInput);
     },
 
     async deploy(projectId, input) {
       deps.logger.debug(`Deploying project: ${projectId}`);
-      return endpoints.deploy(projectId, input as unknown as DeployInput);
+      return await endpoints.deploy(projectId, input as unknown as DeployInput);
     },
 
     async delete(id) {
       deps.logger.debug(`Deleting project: ${id}`);
-      return endpoints.delete(id);
+      return await endpoints.delete(id);
     },
   };
 }

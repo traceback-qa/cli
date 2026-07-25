@@ -48,7 +48,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     },
     async (error: AxiosError) => {
       getLogger()?.debug(`API error: ${String(error.response?.status)} ${error.config?.url}`);
-      return Promise.reject(error);
+      return await Promise.reject(error);
     },
   );
 

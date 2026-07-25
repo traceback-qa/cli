@@ -1,3 +1,4 @@
+/* eslint-disable no-console -- this module IS the CLI's terminal output layer */
 import chalk from 'chalk';
 import type { UIService, SpinnerHandle, UIOptions } from './ui.types.js';
 
@@ -190,7 +191,8 @@ function formatTable(headers: string[], rows: string[][]): string {
   });
 
   const separator = '+' + colWidths.map((w) => '-'.repeat(w)).join('+') + '+';
-  const headerRow = '|' + headers.map((h, i) => chalk.bold(padCenter(h, colWidths[i]!))).join('|') + '|';
+  const headerRow =
+    '|' + headers.map((h, i) => chalk.bold(padCenter(h, colWidths[i]!))).join('|') + '|';
   const dataRows = rows.map(
     (row) => '|' + row.map((cell, i) => padCenter(cell, colWidths[i]!)).join('|') + '|',
   );

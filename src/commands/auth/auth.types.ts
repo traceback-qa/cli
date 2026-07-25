@@ -1,5 +1,3 @@
-import type { Command } from 'commander';
-
 export interface AuthCommandsDeps {
   getCfToken: () => Promise<string | null>;
   login: () => Promise<void>;

@@ -1,4 +1,5 @@
 import type { AxiosInstance } from 'axios';
+import type { Logger } from '../logger/logger.types.js';
 
 export interface ApiResponse<T> {
   data: T;
@@ -11,13 +12,25 @@ export interface ApiResponse<T> {
 
 export interface ApiClient {
   get: <T>(url: string, config?: Record<string, unknown>) => Promise<ApiResponse<T>>;
-  post: <T>(url: string, data?: unknown, config?: Record<string, unknown>) => Promise<ApiResponse<T>>;
-  put: <T>(url: string, data?: unknown, config?: Record<string, unknown>) => Promise<ApiResponse<T>>;
-  patch: <T>(url: string, data?: unknown, config?: Record<string, unknown>) => Promise<ApiResponse<T>>;
+  post: <T>(
+    url: string,
+    data?: unknown,
+    config?: Record<string, unknown>,
+  ) => Promise<ApiResponse<T>>;
+  put: <T>(
+    url: string,
+    data?: unknown,
+    config?: Record<string, unknown>,
+  ) => Promise<ApiResponse<T>>;
+  patch: <T>(
+    url: string,
+    data?: unknown,
+    config?: Record<string, unknown>,
+  ) => Promise<ApiResponse<T>>;
   delete: <T>(url: string, config?: Record<string, unknown>) => Promise<ApiResponse<T>>;
   setBaseUrl: (url: string) => void;
   setAuthToken: (token: string | null) => void;
-  setLogger: (logger: import('../logger/logger.types.js').Logger) => void;
+  setLogger: (logger: Logger) => void;
   getAxiosInstance: () => AxiosInstance;
 }
 
@@ -26,5 +39,5 @@ export interface ApiClientOptions {
   timeout?: number;
   retryAttempts?: number;
   authToken?: string;
-  logger?: import('../logger/logger.types.js').Logger;
+  logger?: Logger;
 }

@@ -64,7 +64,9 @@ async function getCdpUrl(port: number = CDP_PORT, retries: number = 20): Promise
       const url = await new Promise<string>((resolve, reject) => {
         const req = http.get(`http://127.0.0.1:${port}/json/version`, (res) => {
           let data = '';
-          res.on('data', (chunk) => { data += chunk; });
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
           res.on('end', () => {
             try {
               const json = JSON.parse(data);
@@ -79,7 +81,10 @@ async function getCdpUrl(port: number = CDP_PORT, retries: number = 20): Promise
           });
         });
         req.on('error', reject);
-        req.setTimeout(2000, () => { req.destroy(); reject(new Error('timeout')); });
+        req.setTimeout(2000, () => {
+          req.destroy();
+          reject(new Error('timeout'));
+        });
       });
 
       if (url) return url;
@@ -113,9 +118,7 @@ export interface LaunchedChrome {
 export async function launchChrome(port: number = CDP_PORT): Promise<LaunchedChrome> {
   const chromePath = findChrome();
   if (!chromePath) {
-    throw new Error(
-      'Chrome not found. Install Google Chrome and try again.',
-    );
+    throw new Error('Chrome not found. Install Google Chrome and try again.');
   }
 
   // Use a temp profile so we don't interfere with the user's normal Chrome.
@@ -123,18 +126,22 @@ export async function launchChrome(port: number = CDP_PORT): Promise<LaunchedChr
   // user-data-dir means a separate Chrome instance.
   const tempProfile = join(tmpdir(), `traceback-chrome-${Date.now()}`);
 
-  const chromeProcess = spawn(chromePath, [
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${tempProfile}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--no-startup-window',
-    '--window-size=1920,1080',
-    '--window-position=0,0',
-  ], {
-    stdio: 'ignore',
-    detached: false,
-  });
+  const chromeProcess = spawn(
+    chromePath,
+    [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${tempProfile}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--no-startup-window',
+      '--window-size=1920,1080',
+      '--window-position=0,0',
+    ],
+    {
+      stdio: 'ignore',
+      detached: false,
+    },
+  );
 
   // If Chrome crashes immediately, catch it
   chromeProcess.on('error', (err) => {
@@ -148,7 +155,11 @@ export async function launchChrome(port: number = CDP_PORT): Promise<LaunchedChr
     process: chromeProcess,
     cdpUrl,
     kill: () => {
-      try { chromeProcess.kill(); } catch { /* already dead */ }
+      try {
+        chromeProcess.kill();
+      } catch {
+        /* already dead */
+      }
     },
   };
 }

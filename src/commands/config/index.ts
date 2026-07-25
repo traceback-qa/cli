@@ -37,7 +37,10 @@ export function registerConfigCommands(program: Command, getContext: ContextGett
       if (!ctx) return;
 
       const coerced = coerceValue(value);
-      await ctx.infra.config.setGlobalConfig({ [key]: coerced } as Record<string, unknown> as Parameters<typeof ctx.infra.config.setGlobalConfig>[0]);
+      await ctx.infra.config.setGlobalConfig({ [key]: coerced } as Record<
+        string,
+        unknown
+      > as Parameters<typeof ctx.infra.config.setGlobalConfig>[0]);
       ctx.infra.ui.success(`Set ${key} = ${value}`);
     });
 

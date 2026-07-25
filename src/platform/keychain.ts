@@ -1,16 +1,15 @@
 import { execSync } from 'node:child_process';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function getMachineId(): string {
   try {
     switch (process.platform) {
       case 'darwin': {
-        const id = execSync('ioreg -rd1 -c IOPlatformExpertDevice | awk -F\'"\' \'/IOPlatformUUID/ {print $4}\'', {
-          encoding: 'utf-8',
-        }).trim();
+        const id = execSync(
+          "ioreg -rd1 -c IOPlatformExpertDevice | awk -F'\"' '/IOPlatformUUID/ {print $4}'",
+          {
+            encoding: 'utf-8',
+          },
+        ).trim();
         return id;
       }
       case 'linux': {
@@ -55,7 +54,9 @@ function getCipherKey(): Buffer {
 export function encrypt(value: string): string {
   const key = getCipherKey();
   const iv = crypto.randomBytes(IV_LENGTH);
-  const cipher = crypto.createCipheriv(CRYPTO_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+  const cipher = crypto.createCipheriv(CRYPTO_ALGORITHM, key, iv, {
+    authTagLength: AUTH_TAG_LENGTH,
+  });
 
   const encrypted = Buffer.concat([cipher.update(value, 'utf-8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
@@ -73,7 +74,9 @@ export function decrypt(encryptedValue: string): string | null {
     const authTag = buffer.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
     const encrypted = buffer.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
 
-    const decipher = crypto.createDecipheriv(CRYPTO_ALGORITHM, key, iv, { authTagLength: AUTH_TAG_LENGTH });
+    const decipher = crypto.createDecipheriv(CRYPTO_ALGORITHM, key, iv, {
+      authTagLength: AUTH_TAG_LENGTH,
+    });
     decipher.setAuthTag(authTag);
 
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);

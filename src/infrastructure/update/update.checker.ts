@@ -1,6 +1,5 @@
 import type { UpdateChecker, UpdateResult } from './update.types.js';
 import type { Logger } from '../logger/logger.types.js';
-import type { ApiClient } from '../api/api.types.js';
 import { NPM_REGISTRY_URL } from '../../constants/urls.js';
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;

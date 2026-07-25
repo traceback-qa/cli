@@ -9,6 +9,7 @@
 
 import type { Command } from 'commander';
 import type { getContext as GetContextFn } from '../../cli.js';
+import type { CliContext } from '../../types/context.js';
 
 type ContextGetter = typeof GetContextFn;
 
@@ -18,6 +19,8 @@ interface Test {
   goal?: string;
   platform?: string;
   status?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- per-environment config shape not modeled client-side
+  environments?: Record<string, any>;
 }
 
 export function registerTestCommands(program: Command, getContext: ContextGetter): void {
@@ -55,14 +58,13 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
       const spinner = ctx.infra.ui.spinner('Fetching tests...');
       let tests: Test[];
       try {
-        const result = await ctx.infra.api.get<Test[]>(
-          `/workspaces/${workspaceId}/tests`,
-        );
+        const result = await ctx.infra.api.get<Test[]>(`/api/v1/workspaces/${workspaceId}/tests`);
         tests = (result.data || []).filter((t) => {
           if ((t.platform || 'web') !== platform) return false;
           return true;
         });
         spinner.stop();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
       } catch (error: any) {
         if (error.response?.status === 404) {
           spinner.fail('Workspace not found (404)');
@@ -106,10 +108,22 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
           ],
         });
 
-        if (action === 'cloud') {
-          await runInCloud(ctx, workspaceId, testId, selected.name);
-        } else if (action === 'local') {
-          await runLocally(ctx, workspaceId, testId, selected.name);
+        if (action === 'cloud' || action === 'local') {
+          const envs = Object.keys(selected.environments || {});
+          let environment = 'production';
+          if (envs.length > 0) {
+            environment = await select({
+              message: 'Select an environment',
+              choices: envs.map((e) => ({ name: e, value: e })),
+              default: envs.includes('production') ? 'production' : envs[0],
+            });
+          }
+
+          if (action === 'cloud') {
+            await runInCloud(ctx, workspaceId, testId, selected.name, environment);
+          } else {
+            await runLocally(ctx, workspaceId, testId, selected.name, environment);
+          }
         } else if (action === 'details') {
           showDetails(ctx, selected);
         }
@@ -120,12 +134,18 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
 /**
  * Run a test in the cloud (server-side headless browser).
  */
-async function runInCloud(ctx: any, workspaceId: string, testId: string, testName: string): Promise<void> {
+async function runInCloud(
+  ctx: CliContext,
+  workspaceId: string,
+  testId: string,
+  testName: string,
+  environment: string,
+): Promise<void> {
   const spinner = ctx.infra.ui.spinner(`Starting cloud run for "${testName}"...`);
   try {
     const result = await ctx.infra.api.post<{ run_id: string }>(
-      `/workspaces/${workspaceId}/tests/${testId}/run`,
-      { environment: 'production', viewport: 'desktop' },
+      `/api/v1/workspaces/${workspaceId}/tests/${testId}/run`,
+      { environment, viewport: 'desktop' },
     );
     spinner.succeed(`Run started: ${result.data.run_id}`);
     ctx.infra.ui.hint('View results at traceback.dev or use `traceback runs`');
@@ -148,7 +168,13 @@ async function runInCloud(ctx: any, workspaceId: string, testId: string, testNam
  *   7. User watches it happen live in their Chrome window
  *   8. Clean up: close tunnel and Chrome when done
  */
-async function runLocally(ctx: any, workspaceId: string, testId: string, testName: string): Promise<void> {
+async function runLocally(
+  ctx: CliContext,
+  workspaceId: string,
+  testId: string,
+  testName: string,
+  environment: string,
+): Promise<void> {
   const { launchChrome } = await import('../../infrastructure/browser/chrome.launcher.js');
   const { connectTunnel } = await import('../../infrastructure/tunnel/tunnel.client.js');
 
@@ -158,6 +184,7 @@ async function runLocally(ctx: any, workspaceId: string, testId: string, testNam
   try {
     chrome = await launchChrome();
     chromeSpinner.succeed(`Chrome launched (CDP: ${chrome.cdpUrl.slice(0, 40)}...)`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
   } catch (error: any) {
     chromeSpinner.fail(`Failed to launch Chrome: ${error.message}`);
     return;
@@ -173,6 +200,7 @@ async function runLocally(ctx: any, workspaceId: string, testId: string, testNam
     const config = await ctx.infra.config.loadGlobalConfig();
     tunnel = await connectTunnel(config.apiUrl, token.accessToken, chrome.cdpUrl);
     tunnelSpinner.succeed(`Tunnel connected (${tunnel.tunnelId.slice(0, 12)}...)`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
   } catch (error: any) {
     tunnelSpinner.fail(`Tunnel failed: ${error.message}`);
     chrome.kill();
@@ -183,9 +211,9 @@ async function runLocally(ctx: any, workspaceId: string, testId: string, testNam
   const runSpinner = ctx.infra.ui.spinner(`Running "${testName}" locally...`);
   try {
     const result = await ctx.infra.api.post<{ run_id: string }>(
-      `/workspaces/${workspaceId}/tests/${testId}/run`,
+      `/api/v1/workspaces/${workspaceId}/tests/${testId}/run`,
       {
-        environment: 'production',
+        environment,
         viewport: 'desktop',
         tunnel_id: tunnel.tunnelId,
       },
@@ -218,7 +246,7 @@ async function runLocally(ctx: any, workspaceId: string, testId: string, testNam
 /**
  * Show test details in the terminal.
  */
-function showDetails(ctx: any, test: Test): void {
+function showDetails(ctx: CliContext, test: Test): void {
   ctx.infra.ui.info(`\n  Name:      ${test.name}`);
   ctx.infra.ui.info(`  ID:        ${test.id}`);
   ctx.infra.ui.info(`  Platform:  ${test.platform || 'web'}`);
@@ -237,7 +265,12 @@ function showDetails(ctx: any, test: Test): void {
  *   2. Show the list for user to select
  *   3. Dispatch the run with the selected device info
  */
-async function handleMobileTest(ctx: any, workspaceId: string, testId: string, test: Test): Promise<void> {
+async function handleMobileTest(
+  ctx: CliContext,
+  workspaceId: string,
+  testId: string,
+  test: Test,
+): Promise<void> {
   const { select } = await import('@inquirer/prompts');
   const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
 
@@ -256,7 +289,7 @@ async function handleMobileTest(ctx: any, workspaceId: string, testId: string, t
   }
 
   if (action === 'cloud') {
-    await runInCloud(ctx, workspaceId, testId, test.name);
+    await runInCloud(ctx, workspaceId, testId, test.name, 'production');
     return;
   }
 
@@ -303,7 +336,10 @@ async function handleMobileTest(ctx: any, workspaceId: string, testId: string, t
       platform: device.platform,
       deviceName: device.name,
     });
-    bridgeSpinner.succeed(`Connected to ${device.name} (session: ${bridge.sessionId.slice(0, 12)}...)`);
+    bridgeSpinner.succeed(
+      `Connected to ${device.name} (session: ${bridge.sessionId.slice(0, 12)}...)`,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
   } catch (error: any) {
     bridgeSpinner.fail(`Failed to connect: ${error.message}`);
     ctx.infra.ui.hint('Make sure Appium is running: `appium`');
@@ -316,7 +352,7 @@ async function handleMobileTest(ctx: any, workspaceId: string, testId: string, t
   const runSpinner = ctx.infra.ui.spinner(`Running "${test.name}" on ${device.name}...`);
   try {
     const result = await ctx.infra.api.post<{ run_id: string }>(
-      `/workspaces/${workspaceId}/tests/${testId}/run`,
+      `/api/v1/workspaces/${workspaceId}/tests/${testId}/run`,
       {
         environment: 'production',
         viewport: 'phone',

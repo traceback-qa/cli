@@ -3,10 +3,7 @@ import type { CliContext } from '../../types/context.js';
 
 type ContextGetter = (cmd: Command) => CliContext | undefined;
 
-export function registerMcpCommands(
-  program: Command,
-  getContext: ContextGetter,
-): void {
+export function registerMcpCommands(program: Command, getContext: ContextGetter): void {
   program
     .command('mcp')
     .description('Start the Traceback MCP server for AI agent integrations')

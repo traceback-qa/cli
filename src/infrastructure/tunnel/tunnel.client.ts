@@ -39,9 +39,10 @@ export async function connectTunnel(
 ): Promise<TunnelConnection> {
   // Build WebSocket URL with token as query param.
   // e.g. http://localhost:8000/api/v1 → ws://localhost:8000/api/v1/tunnel/connect?token=tb_xxx
-  const wsUrl = apiBaseUrl.replace(/^http/, 'ws') + `/tunnel/connect?token=${encodeURIComponent(authToken)}`;
+  const wsUrl =
+    apiBaseUrl.replace(/^http/, 'ws') + `/tunnel/connect?token=${encodeURIComponent(authToken)}`;
 
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
 
     let tunnelId: string | null = null;
@@ -59,16 +60,22 @@ export async function connectTunnel(
           tunnelId = msg.tunnel_id;
 
           // Advertise our Chrome's CDP URL so the backend worker can use it
-          ws.send(JSON.stringify({
-            type: 'cdp_ready',
-            cdp_url: cdpUrl,
-          }));
+          ws.send(
+            JSON.stringify({
+              type: 'cdp_ready',
+              cdp_url: cdpUrl,
+            }),
+          );
 
           clearTimeout(timeout);
           resolve({
             tunnelId: tunnelId!,
             close: () => {
-              try { ws.close(); } catch { /* already closed */ }
+              try {
+                ws.close();
+              } catch {
+                /* already closed */
+              }
             },
           });
         }

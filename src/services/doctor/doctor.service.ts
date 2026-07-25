@@ -28,7 +28,11 @@ async function checkConfigDir(deps: DoctorServiceDeps): Promise<DoctorCheckResul
       suggestion: 'This will be created on first use.',
     };
   } catch {
-    return { name: 'Config directory', status: 'error', message: 'Could not check config directory' };
+    return {
+      name: 'Config directory',
+      status: 'error',
+      message: 'Could not check config directory',
+    };
   }
 }
 
@@ -50,7 +54,11 @@ async function checkAuth(deps: DoctorServiceDeps): Promise<DoctorCheckResult> {
       suggestion: 'Run `traceback auth login` to authenticate.',
     };
   } catch {
-    return { name: 'Authentication', status: 'error', message: 'Could not check authentication status' };
+    return {
+      name: 'Authentication',
+      status: 'error',
+      message: 'Could not check authentication status',
+    };
   }
 }
 
@@ -79,7 +87,11 @@ async function checkUpdates(deps: DoctorServiceDeps): Promise<DoctorCheckResult>
         suggestion: 'Run `traceback update install` to update.',
       };
     }
-    return { name: 'CLI version', status: 'ok', message: `Up to date (${result?.current ?? 'unknown'})` };
+    return {
+      name: 'CLI version',
+      status: 'ok',
+      message: `Up to date (${result?.current ?? 'unknown'})`,
+    };
   } catch {
     return { name: 'CLI version', status: 'warning', message: 'Could not check for updates' };
   }

@@ -8,11 +8,7 @@ export class ApiError extends TracebackError {
 
   readonly httpStatus: number;
 
-  constructor(
-    message: string,
-    httpStatus: number,
-    opts?: { help?: string; retryable?: boolean },
-  ) {
+  constructor(message: string, httpStatus: number, opts?: { help?: string; retryable?: boolean }) {
     super(message, opts);
     this.httpStatus = httpStatus;
     this.retryable = opts?.retryable ?? false;

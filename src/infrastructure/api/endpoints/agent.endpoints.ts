@@ -6,8 +6,7 @@ export function createAgentEndpoints(client: ApiClient) {
 
     get: (id: string) => client.get<Agent>(`/agents/${id}`).then((r) => r.data),
 
-    create: (input: CreateAgentInput) =>
-      client.post<Agent>('/agents', input).then((r) => r.data),
+    create: (input: CreateAgentInput) => client.post<Agent>('/agents', input).then((r) => r.data),
 
     delete: (id: string) => client.delete<void>(`/agents/${id}`).then(() => undefined),
   };

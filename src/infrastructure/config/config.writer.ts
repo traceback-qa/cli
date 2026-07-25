@@ -1,6 +1,17 @@
-import type { ConfigService, ConfigServiceOptions, GlobalConfig, ProjectConfig, ResolvedConfig } from './config.types.js';
-import { loadGlobalConfigFromFile, saveGlobalConfigFile, loadProjectConfigFromCwd } from './config.loader.js';
-import { createEnvSource, createDefaultsSource, createFileSource, resolveConfig } from './config.resolver.js';
+import type {
+  ConfigService,
+  ConfigServiceOptions,
+  GlobalConfig,
+  ProjectConfig,
+  ResolvedConfig,
+} from './config.types.js';
+import { saveGlobalConfigFile, loadProjectConfigFromCwd } from './config.loader.js';
+import {
+  createEnvSource,
+  createDefaultsSource,
+  createFileSource,
+  resolveConfig,
+} from './config.resolver.js';
 
 export function createConfigService(opts: ConfigServiceOptions): ConfigService {
   const { configDir, logger } = opts;
@@ -9,12 +20,8 @@ export function createConfigService(opts: ConfigServiceOptions): ConfigService {
   return {
     async loadGlobalConfig(): Promise<ResolvedConfig> {
       logger.debug(`Loading global config from: ${configPath}`);
-      const sources = [
-        createDefaultsSource(),
-        createFileSource(configPath),
-        createEnvSource(),
-      ];
-      return resolveConfig(sources);
+      const sources = [createDefaultsSource(), createFileSource(configPath), createEnvSource()];
+      return await resolveConfig(sources);
     },
 
     async loadProjectConfig(cwd: string): Promise<ProjectConfig | null> {

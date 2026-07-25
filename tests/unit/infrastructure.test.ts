@@ -49,9 +49,8 @@ describe('Logger', () => {
 
 describe('Config', () => {
   it('should load config from file', async () => {
-    const { loadGlobalConfigFromFile } = await import(
-      '../../src/infrastructure/config/config.loader.js'
-    );
+    const { loadGlobalConfigFromFile } =
+      await import('../../src/infrastructure/config/config.loader.js');
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'traceback-test-'));
     const filePath = path.join(tmpDir, 'config.json');
 
@@ -70,9 +69,8 @@ describe('Config', () => {
   });
 
   it('should return null for invalid config file', async () => {
-    const { loadGlobalConfigFromFile } = await import(
-      '../../src/infrastructure/config/config.loader.js'
-    );
+    const { loadGlobalConfigFromFile } =
+      await import('../../src/infrastructure/config/config.loader.js');
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'traceback-test-'));
     const filePath = path.join(tmpDir, 'config.json');
 

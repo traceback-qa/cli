@@ -8,3 +8,4 @@ export { registerDoctorCommands } from './doctor/index.js';
 export { registerUpdateCommands } from './update/index.js';
 export { registerCompletionCommands } from './completion/index.js';
 export { registerMcpCommands } from './mcp/index.js';
+export { registerMobileCommands } from './mobile/index.js';

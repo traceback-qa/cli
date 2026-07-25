@@ -37,29 +37,33 @@ function detectAndroidDevices(): MobileDevice[] {
       stdio: ['pipe', 'pipe', 'ignore'],
     });
 
-    return output
-      .split('\n')
-      .slice(1) // Skip "List of devices attached" header
-      .filter((line) => line.includes('device') && !line.includes('offline'))
-      .map((line) => {
-        const parts = line.trim().split(/\s+/);
-        const id = parts[0];
-        // Extract model name from the -l output (e.g. model:Pixel_7)
-        const modelMatch = line.match(/model:(\S+)/);
-        const name = modelMatch
-          ? modelMatch[1].replace(/_/g, ' ')
-          : id.startsWith('emulator')
-            ? `Android Emulator (${id})`
-            : `Android Device (${id})`;
+    const devices: MobileDevice[] = [];
 
-        return {
-          id,
-          name,
-          platform: 'android' as const,
-          state: 'device',
-        };
-      })
-      .filter((d) => d.id);
+    for (const line of output.split('\n').slice(1)) {
+      if (!line.includes('device') || line.includes('offline')) continue;
+
+      const parts = line.trim().split(/\s+/);
+      const id = parts[0];
+      if (!id) continue;
+
+      // Extract model name from the -l output (e.g. model:Pixel_7)
+      const modelMatch = line.match(/model:(\S+)/);
+      const modelName = modelMatch?.[1];
+      const name = modelName
+        ? modelName.replace(/_/g, ' ')
+        : id.startsWith('emulator')
+          ? `Android Emulator (${id})`
+          : `Android Device (${id})`;
+
+      devices.push({
+        id,
+        name,
+        platform: 'android' as const,
+        state: 'device',
+      });
+    }
+
+    return devices;
   } catch {
     // adb not installed or not in PATH
     return [];
@@ -90,10 +94,12 @@ function detectIOSSimulators(): MobileDevice[] {
     for (const line of output.split('\n')) {
       // Match lines like: "    iPhone 15 Pro (ABCD-1234-...) (Booted)"
       const match = line.match(/^\s+(.+?)\s+\(([A-F0-9-]+)\)\s+\(Booted\)/i);
-      if (match) {
+      const name = match?.[1];
+      const id = match?.[2];
+      if (name && id) {
         devices.push({
-          id: match[2],
-          name: match[1],
+          id,
+          name,
           platform: 'ios',
           state: 'Booted',
         });

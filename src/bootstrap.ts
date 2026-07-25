@@ -6,7 +6,10 @@ import { createFileStore } from './infrastructure/storage/file.store.js';
 import { createApiClient } from './infrastructure/api/client.js';
 import { createFileAuthStore } from './infrastructure/auth/auth.store.js';
 import { createAuthService } from './infrastructure/auth/auth.refresher.js';
-import { createTelemetryService, createNoopTelemetryService } from './infrastructure/telemetry/telemetry.service.js';
+import {
+  createTelemetryService,
+  createNoopTelemetryService,
+} from './infrastructure/telemetry/telemetry.service.js';
 import { createUpdateChecker } from './infrastructure/update/update.checker.js';
 import { createProjectService } from './services/project/project.service.js';
 import { createAgentService } from './services/agent/agent.service.js';
@@ -15,6 +18,7 @@ import { createDoctorService } from './services/doctor/doctor.service.js';
 import { resolveFlags } from './middleware/inject-context.js';
 import { getConfigDir, getGlobalAuthPath, getLogsDir } from './platform/paths.js';
 import type { ResolvedFlags } from './types/context.js';
+import type { StoredToken } from './infrastructure/auth/auth.types.js';
 
 export interface BootstrapOptions extends ResolvedFlags {}
 
@@ -61,23 +65,18 @@ export async function bootstrap(opts: BootstrapOptions): Promise<CliContext> {
   const authService = createAuthService(apiClient, authStore, logger);
 
   const token = await authStore.get();
-  if (token && !isTokenExpired(token.expiresAt)) {
+  if (token && isTokenValid(token)) {
     apiClient.setAuthToken(token.accessToken);
-    logger.debug(`Authenticated as ${token.email}`);
+    const label = token.workspaceSlug || token.email || 'unknown';
+    logger.debug(`Authenticated — workspace: ${label}`);
   }
 
   const telemetryEnabled = resolvedConfig.telemetryEnabled && !flags.ci;
   const telemetryService = telemetryEnabled
-    ? createTelemetryService(
-        { enabled: true, apiUrl: resolvedConfig.apiUrl },
-        logger,
-      )
+    ? createTelemetryService({ enabled: true, apiUrl: resolvedConfig.apiUrl }, logger)
     : createNoopTelemetryService();
 
-  const updateChecker = createUpdateChecker(
-    process.env.TRACEBACK_VERSION ?? '0.0.0',
-    logger,
-  );
+  const updateChecker = createUpdateChecker(process.env.TRACEBACK_VERSION ?? '0.0.0', logger);
 
   const infra: InfraRegistry = {
     api: apiClient,
@@ -109,6 +108,9 @@ export async function bootstrap(opts: BootstrapOptions): Promise<CliContext> {
   return { services, infra, flags };
 }
 
-function isTokenExpired(expiresAt: number): boolean {
-  return Date.now() >= expiresAt - 60_000;
+function isTokenValid(token: StoredToken): boolean {
+  // API keys have no expiry — the token is valid as long as it exists.
+  // JWT-based tokens (legacy) check expiresAt.
+  if (token.expiresAt == null) return true;
+  return Date.now() < token.expiresAt - 60_000;
 }

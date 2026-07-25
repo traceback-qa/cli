@@ -1,5 +1,4 @@
 import type { Command } from 'commander';
-import type { CliContext } from '../types/context.js';
 
 export function registerGlobalFlags(program: Command): void {
   program
@@ -21,7 +20,7 @@ export function extractGlobalFlags(options: Record<string, unknown>): {
     debug: Boolean(options['debug']),
     silent: Boolean(options['silent']),
     json: Boolean(options['json']),
-    noColor: !(options['color'] as boolean | undefined ?? true),
+    noColor: !((options['color'] as boolean | undefined) ?? true),
     ci: Boolean(options['ci']),
   };
 }

@@ -1,9 +1,12 @@
 export interface StoredToken {
   accessToken: string;
-  tokenId: string;
-  userId: string;
-  email: string;
+  workspaceId: string;
+  workspaceSlug: string;
+  tokenId?: string;
+  userId?: string;
+  email?: string;
   issuedAt: number;
+  expiresAt?: number;
 }
 
 export interface AuthStore {

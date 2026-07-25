@@ -11,7 +11,10 @@ export function normalizeError(error: unknown): TracebackError {
   return new UnexpectedError(String(error));
 }
 
-export function renderError(error: TracebackError, ctx: { infra: { ui: CliContext['infra']['ui'] } }): void {
+export function renderError(
+  error: TracebackError,
+  ctx: { infra: { ui: CliContext['infra']['ui'] } },
+): void {
   ctx.infra.ui.error(error.message);
 
   if (error.help) {
@@ -33,7 +36,9 @@ export function handleError(error: unknown, ctx: CliContext): never {
   const tbError = normalizeError(error);
 
   if (ctx.flags.debug) {
-    (ctx.infra.logger as { debug: (msg: string, ...args: unknown[]) => void }).debug(`Error: ${tbError.message}`);
+    (ctx.infra.logger as { debug: (msg: string, ...args: unknown[]) => void }).debug(
+      `Error: ${tbError.message}`,
+    );
   }
 
   renderError(tbError, ctx);

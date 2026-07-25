@@ -10,7 +10,10 @@ export abstract class TracebackError extends Error {
   readonly docsUrl?: string;
   readonly context?: Record<string, unknown>;
 
-  constructor(message: string, opts?: { help?: string; docsUrl?: string; context?: Record<string, unknown> }) {
+  constructor(
+    message: string,
+    opts?: { help?: string; docsUrl?: string; context?: Record<string, unknown> },
+  ) {
     super(message);
     this.name = this.constructor.name;
     this.help = opts?.help;

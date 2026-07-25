@@ -55,23 +55,25 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
   // Step 1: Create an Appium session that attaches to the current foreground app.
   // We use autoLaunch=false so it doesn't launch a new app — just connects to whatever's open.
-  const capabilities: Record<string, any> = opts.platform === 'android'
-    ? {
-      platformName: 'Android',
-      'appium:automationName': 'UiAutomator2',
-      'appium:udid': opts.deviceId,
-      'appium:autoLaunch': false,
-      'appium:noReset': true,
-      // Attach to the current foreground app
-      'appium:autoGrantPermissions': true,
-    }
-    : {
-      platformName: 'iOS',
-      'appium:automationName': 'XCUITest',
-      'appium:udid': opts.deviceId,
-      'appium:autoLaunch': false,
-      'appium:noReset': true,
-    };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Appium capability values are a mixed bag of primitives
+  const capabilities: Record<string, any> =
+    opts.platform === 'android'
+      ? {
+          platformName: 'Android',
+          'appium:automationName': 'UiAutomator2',
+          'appium:udid': opts.deviceId,
+          'appium:autoLaunch': false,
+          'appium:noReset': true,
+          // Attach to the current foreground app
+          'appium:autoGrantPermissions': true,
+        }
+      : {
+          platformName: 'iOS',
+          'appium:automationName': 'XCUITest',
+          'appium:udid': opts.deviceId,
+          'appium:autoLaunch': false,
+          'appium:noReset': true,
+        };
 
   const sessionRes = await fetchJson(`${appiumUrl}/session`, {
     method: 'POST',
@@ -82,7 +84,9 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
   const appiumSessionId = sessionRes?.value?.sessionId;
   if (!appiumSessionId) {
-    throw new Error('Failed to create Appium session — is Appium running and the device connected?');
+    throw new Error(
+      'Failed to create Appium session — is Appium running and the device connected?',
+    );
   }
 
   // Step 2: Connect to the backend via Socket.IO
@@ -117,11 +121,13 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
       });
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
     socket.on('cli_authenticated', (data: any) => {
       clearTimeout(timeout);
       resolve(data.session_id);
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
     socket.on('cli_error', (data: any) => {
       clearTimeout(timeout);
       reject(new Error(data.message || 'CLI authentication failed'));
@@ -134,10 +140,12 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
   });
 
   // Step 3: Listen for agent commands and relay them to Appium
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
   socket.on('agent_command', async (data: any) => {
     const { request_id, command, data: cmdData } = data;
 
     try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result shape varies per command
       let result: any = {};
 
       switch (command) {
@@ -158,16 +166,27 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
         case 'execute_action': {
           const { action, target, value, resolved } = cmdData;
-          console.log(`[Appium] ${action} → ${target?.what || 'no target'} (value: ${value || 'none'})`);
+          /* eslint-disable no-console -- direct user-facing terminal output for live action progress */
+          console.log(
+            `[Appium] ${action} → ${target?.what || 'no target'} (value: ${value || 'none'})`,
+          );
           if (resolved?.strategy) {
             console.log(`[Appium] LLM resolved: ${resolved.strategy} = "${resolved.locator}"`);
           }
-          result = await executeAppiumAction(appiumUrl, appiumSessionId, action, target, value, resolved);
+          result = await executeAppiumAction(
+            appiumUrl,
+            appiumSessionId,
+            action,
+            target,
+            value,
+            resolved,
+          );
           if (result.error) {
             console.log(`[Appium] ✗ ${result.error}`);
           } else {
             console.log(`[Appium] ✓ ${result.result}`);
           }
+          /* eslint-enable no-console */
           break;
         }
 
@@ -196,6 +215,7 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
       // Send the result back to the backend agent
       socket.emit('agent_response', { request_id, data: result });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- command dispatch error shape not modeled client-side
     } catch (err: any) {
       socket.emit('agent_response', {
         request_id,
@@ -234,9 +254,11 @@ async function executeAppiumAction(
   appiumUrl: string,
   sessionId: string,
   action: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- target descriptor shape varies by action type
   target: any,
   value: string | null,
   resolved?: { strategy?: string; locator?: string } | null,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result shape varies by action type
 ): Promise<any> {
   const base = `${appiumUrl}/session/${sessionId}`;
 
@@ -305,6 +327,7 @@ async function executeAppiumAction(
  * but the actual iOS element label is just "Add". We try the full string
  * first, then progressively shorter/simpler versions.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- target descriptor shape varies by action type
 async function findElement(baseUrl: string, target: any): Promise<string | null> {
   const what = target?.what || '';
 
@@ -332,9 +355,16 @@ async function findElement(baseUrl: string, target: any): Promise<string | null>
   const lowerWhat = what.toLowerCase();
   if (lowerWhat.includes('button') || lowerWhat.includes('tap') || lowerWhat.includes('click')) {
     // Try finding any button with a matching short label
-    const shortLabel = what.replace(/\b(button|the|to|a|an|on|in)\b/gi, '').trim().split(/\s+/)[0];
+    const shortLabel = what
+      .replace(/\b(button|the|to|a|an|on|in)\b/gi, '')
+      .trim()
+      .split(/\s+/)[0];
     if (shortLabel) {
-      const byBtn = await tryFind(baseUrl, '-ios predicate string', `type == "XCUIElementTypeButton" AND (label CONTAINS "${shortLabel}" OR name CONTAINS "${shortLabel}")`);
+      const byBtn = await tryFind(
+        baseUrl,
+        '-ios predicate string',
+        `type == "XCUIElementTypeButton" AND (label CONTAINS "${shortLabel}" OR name CONTAINS "${shortLabel}")`,
+      );
       if (byBtn) return byBtn;
     }
   }
@@ -342,11 +372,19 @@ async function findElement(baseUrl: string, target: any): Promise<string | null>
     // Extract the field name — "First name input field" → "First name"
     const fieldName = what.replace(/\b(input|field|text|the|into|enter)\b/gi, '').trim();
     if (fieldName) {
-      const byField = await tryFind(baseUrl, '-ios predicate string', `(type == "XCUIElementTypeTextField" OR type == "XCUIElementTypeSecureTextField") AND (label CONTAINS "${fieldName}" OR name CONTAINS "${fieldName}" OR value CONTAINS "${fieldName}")`);
+      const byField = await tryFind(
+        baseUrl,
+        '-ios predicate string',
+        `(type == "XCUIElementTypeTextField" OR type == "XCUIElementTypeSecureTextField") AND (label CONTAINS "${fieldName}" OR name CONTAINS "${fieldName}" OR value CONTAINS "${fieldName}")`,
+      );
       if (byField) return byField;
     }
     // Last resort: just find the first visible text field
-    const anyField = await tryFind(baseUrl, 'xpath', `(//XCUIElementTypeTextField | //XCUIElementTypeSecureTextField)[1]`);
+    const anyField = await tryFind(
+      baseUrl,
+      'xpath',
+      `(//XCUIElementTypeTextField | //XCUIElementTypeSecureTextField)[1]`,
+    );
     if (anyField) return anyField;
   }
 
@@ -363,7 +401,10 @@ function buildSearchTerms(what: string): string[] {
 
   // Remove common filler words and try the shorter version
   const stripped = what
-    .replace(/\b(to|the|a|an|that|this|into|from|with|for|on|in|of|is|are|was|were|button|field|input|text)\b/gi, '')
+    .replace(
+      /\b(to|the|a|an|that|this|into|from|with|for|on|in|of|is|are|was|were|button|field|input|text)\b/gi,
+      '',
+    )
     .replace(/\s+/g, ' ')
     .trim();
   if (stripped && stripped !== what) {
@@ -371,12 +412,17 @@ function buildSearchTerms(what: string): string[] {
   }
 
   // Try just the first 1-2 significant words
-  const words = what.replace(/\b(the|a|an|to|tap|click|enter|type)\b/gi, '').trim().split(/\s+/).filter(Boolean);
+  const words = what
+    .replace(/\b(the|a|an|to|tap|click|enter|type)\b/gi, '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   if (words.length > 1) {
     terms.push(words.slice(0, 2).join(' '));
   }
-  if (words.length > 0 && !terms.includes(words[0])) {
-    terms.push(words[0]);
+  const firstWord = words[0];
+  if (firstWord && !terms.includes(firstWord)) {
+    terms.push(firstWord);
   }
 
   // Deduplicate
@@ -399,8 +445,9 @@ async function tryFind(baseUrl: string, strategy: string, value: string): Promis
 /**
  * Simple fetch wrapper for Appium WebDriver HTTP API.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic WebDriver JSON response shape not modeled client-side
 async function fetchJson(url: string, options?: { method?: string; body?: string }): Promise<any> {
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const req = http.request(
       {
@@ -412,9 +459,15 @@ async function fetchJson(url: string, options?: { method?: string; body?: string
       },
       (res) => {
         let data = '';
-        res.on('data', (chunk) => { data += chunk; });
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
         res.on('end', () => {
-          try { resolve(JSON.parse(data)); } catch { resolve(null); }
+          try {
+            resolve(JSON.parse(data));
+          } catch {
+            resolve(null);
+          }
         });
       },
     );

@@ -10,22 +10,22 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
   return {
     async list() {
       deps.logger.debug('Listing agents');
-      return endpoints.list() as Promise<unknown[]>;
+      return await (endpoints.list() as Promise<unknown[]>);
     },
 
     async get(id: string) {
       deps.logger.debug(`Getting agent: ${id}`);
-      return endpoints.get(id);
+      return await endpoints.get(id);
     },
 
     async create(input) {
       deps.logger.debug('Creating agent');
-      return endpoints.create(input as unknown as CreateAgentInput);
+      return await endpoints.create(input as unknown as CreateAgentInput);
     },
 
     async delete(id) {
       deps.logger.debug(`Deleting agent: ${id}`);
-      return endpoints.delete(id);
+      return await endpoints.delete(id);
     },
   };
 }

@@ -45,10 +45,11 @@ export function createLogger(opts: LoggerOptions): Logger {
 
 function wrapPinoLogger(pinoLogger: pino.Logger, initialLevel?: LogLevel): Logger {
   const levelStr = pinoLogger.level as string;
-  let currentLevel: LogLevel = initialLevel ?? (levelStr === 'silent' ? 'silent' : (levelStr as LogLevel));
+  let currentLevel: LogLevel =
+    initialLevel ?? (levelStr === 'silent' ? 'silent' : (levelStr as LogLevel));
 
   return {
-    silent: (msg: string, ...args: unknown[]) => {},
+    silent: () => {},
     error: (msg: string, ...args: unknown[]) => pinoLogger.error(args.length ? args[0] : msg, msg),
     warn: (msg: string, ...args: unknown[]) => pinoLogger.warn(args.length ? args[0] : msg, msg),
     info: (msg: string, ...args: unknown[]) => pinoLogger.info(args.length ? args[0] : msg, msg),
@@ -59,7 +60,8 @@ function wrapPinoLogger(pinoLogger: pino.Logger, initialLevel?: LogLevel): Logge
       pinoLogger.level = levelToPino(level);
     },
     getLevel: () => currentLevel,
-    child: (bindings: Record<string, unknown>) => wrapPinoLogger(pinoLogger.child(bindings), currentLevel),
+    child: (bindings: Record<string, unknown>) =>
+      wrapPinoLogger(pinoLogger.child(bindings), currentLevel),
   };
 }
 

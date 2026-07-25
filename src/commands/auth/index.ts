@@ -17,7 +17,7 @@ export function registerAuthCommands(program: Command, getContext: ContextGetter
       const spinner = ctx.infra.ui.spinner('Waiting for approval...');
 
       try {
-        const token = await ctx.infra.auth.loginWithBrowser();
+        await ctx.infra.auth.loginWithBrowser();
         spinner.succeed('Authentication successful');
 
         const account = await ctx.infra.auth.getCurrentAccount();

@@ -24,22 +24,23 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 
   // ── Workspace tools ──────────────────────────────────────
 
-  server.tool(
-    'list_workspaces',
-    'List all workspaces the user has access to',
-    {},
-    async () => {
-      if (!api) return { content: [{ type: 'text', text: 'Not authenticated. Run `traceback auth login` first.' }] };
-      try {
-        const res = await api.get<any[]>('/workspaces');
-        const workspaces = res.data;
-        const lines = workspaces.map((w: any) => `• ${w.name} (${w.id})`).join('\n');
-        return { content: [{ type: 'text', text: lines || 'No workspaces found.' }] };
-      } catch (err: any) {
-        return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
-      }
-    },
-  );
+  server.tool('list_workspaces', 'List all workspaces the user has access to', {}, async () => {
+    if (!api)
+      return {
+        content: [{ type: 'text', text: 'Not authenticated. Run `traceback auth login` first.' }],
+      };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
+      const res = await api.get<any[]>('/api/v1/workspaces');
+      const workspaces = res.data;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
+      const lines = workspaces.map((w: any) => `• ${w.name} (${w.id})`).join('\n');
+      return { content: [{ type: 'text', text: lines || 'No workspaces found.' }] };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
+    } catch (err: any) {
+      return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
+    }
+  });
 
   server.tool(
     'select_workspace',
@@ -48,37 +49,40 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
     async ({ workspace_id }) => {
       if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
       try {
-        const res = await api.get<any>(`/workspaces/${workspace_id}`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace shape not modeled client-side
+        const res = await api.get<any>(`/api/v1/workspaces/${workspace_id}`);
         activeWorkspaceId = workspace_id;
         activeWorkspaceName = res.data?.name || workspace_id;
         return {
-          content: [{
-            type: 'text',
-            text: `Workspace "${activeWorkspaceName}" selected. All subsequent operations will use this workspace.`,
-          }],
+          content: [
+            {
+              type: 'text',
+              text: `Workspace "${activeWorkspaceName}" selected. All subsequent operations will use this workspace.`,
+            },
+          ],
         };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
       } catch (err: any) {
         return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
       }
     },
   );
 
-  server.tool(
-    'current_workspace',
-    'Show the currently selected workspace',
-    {},
-    async () => {
-      if (!activeWorkspaceId) {
-        return { content: [{ type: 'text', text: 'No workspace selected. Use select_workspace first.' }] };
-      }
+  server.tool('current_workspace', 'Show the currently selected workspace', {}, async () => {
+    if (!activeWorkspaceId) {
       return {
-        content: [{
+        content: [{ type: 'text', text: 'No workspace selected. Use select_workspace first.' }],
+      };
+    }
+    return {
+      content: [
+        {
           type: 'text',
           text: `Current workspace: ${activeWorkspaceName} (${activeWorkspaceId})`,
-        }],
-      };
-    },
-  );
+        },
+      ],
+    };
+  });
 
   // ── Verification tool ────────────────────────────────────
 
@@ -92,12 +96,16 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
     async ({ goal, url }) => {
       if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
       if (!activeWorkspaceId) {
-        return { content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }] };
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
       }
 
       // Normalize bare URLs — agents often omit the scheme (e.g. "localhost:3000")
       const normalizedUrl = /^https?:\/\//i.test(url) ? url : `http://${url}`;
-      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)/i.test(normalizedUrl);
+      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)/i.test(
+        normalizedUrl,
+      );
       let tunnelId: string | undefined;
       let cleanup: (() => Promise<void>) | undefined;
 
@@ -108,8 +116,9 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
           cleanup = tunnel.cleanup;
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- verify-implementation response shape not modeled client-side
         const res = await api.post<any>(
-          `/workspaces/${activeWorkspaceId}/mcp/verify-implementation`,
+          `/api/v1/workspaces/${activeWorkspaceId}/mcp/verify-implementation`,
           { goal, url: normalizedUrl, tunnel_id: tunnelId },
           { timeout: 300_000 }, // 5 minutes — agent may take a while
         );
@@ -131,7 +140,9 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
           }
           if (data.llm_stats) {
             lines.push('');
-            lines.push(`LLM: ${data.llm_stats.llm_calls} calls, ${data.llm_stats.total_tokens} tokens, $${data.llm_stats.estimated_cost_usd}`);
+            lines.push(
+              `LLM: ${data.llm_stats.llm_calls} calls, ${data.llm_stats.total_tokens} tokens, $${data.llm_stats.estimated_cost_usd}`,
+            );
           }
         } else if (data.status === 'error') {
           lines.push(`Error: ${data.message}`);
@@ -151,29 +162,40 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
     'Create a new, permanent test definition in the Traceback workspace.',
     {
       name: z.string().min(1).describe('A short, descriptive name for the test'),
-      goal: z.string().min(1).describe('The natural language instructions for the agent (e.g. "Verify the submit button exists")'),
+      goal: z
+        .string()
+        .min(1)
+        .describe(
+          'The natural language instructions for the agent (e.g. "Verify the submit button exists")',
+        ),
     },
     async ({ name, goal }) => {
       if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
       if (!activeWorkspaceId) {
-        return { content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }] };
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
       }
 
       try {
-        const res = await api.post<any>(
-          `/workspaces/${activeWorkspaceId}/tests`,
-          { name, goal }
-        );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- created-test response shape not modeled client-side
+        const res = await api.post<any>(`/api/v1/workspaces/${activeWorkspaceId}/tests`, {
+          name,
+          goal,
+        });
         return {
-          content: [{
-            type: 'text',
-            text: `Test "${name}" created successfully (ID: ${res.data.id}).`,
-          }],
+          content: [
+            {
+              type: 'text',
+              text: `Test "${name}" created successfully (ID: ${res.data.id}).`,
+            },
+          ],
         };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
       } catch (err: any) {
         return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
       }
-    }
+    },
   );
 
   // ── Resources ────────────────────────────────────────────
@@ -181,31 +203,42 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
   server.resource(
     'Traceback Test Coverage',
     'traceback://tests',
-    { description: 'Read this resource to view all existing test definitions in the current Traceback workspace. Useful to understand test coverage before creating new tests.' },
+    {
+      description:
+        'Read this resource to view all existing test definitions in the current Traceback workspace. Useful to understand test coverage before creating new tests.',
+    },
     async (uri) => {
       if (!api) throw new Error('Not authenticated.');
       if (!activeWorkspaceId) throw new Error('No workspace selected.');
 
-      const res = await api.get<any>(`/workspaces/${activeWorkspaceId}/tests`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test list response shape not modeled client-side
+      const res = await api.get<any>(`/api/v1/workspaces/${activeWorkspaceId}/tests`);
       const tests = Array.isArray(res.data) ? res.data : res.data.data || [];
 
       if (tests.length === 0) {
         return {
-          contents: [{
-            uri: uri.href,
-            text: 'No tests found in this workspace.',
-          }]
+          contents: [
+            {
+              uri: uri.href,
+              text: 'No tests found in this workspace.',
+            },
+          ],
         };
       }
 
-      const lines = tests.map((t: any) => `# ${t.name} (ID: ${t.id})\nGoal: ${t.definition || t.goal || ''}\n`);
+      const lines = tests.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test list response shape not modeled client-side
+        (t: any) => `# ${t.name} (ID: ${t.id})\nGoal: ${t.definition || t.goal || ''}\n`,
+      );
       return {
-        contents: [{
-          uri: uri.href,
-          text: lines.join('\n'),
-        }]
+        contents: [
+          {
+            uri: uri.href,
+            text: lines.join('\n'),
+          },
+        ],
       };
-    }
+    },
   );
 
   // ── Prompts ──────────────────────────────────────────────
@@ -220,11 +253,11 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
           role: 'user',
           content: {
             type: 'text',
-            text: 'You are a TDD coding assistant. For every UI task, you must follow a strict process: write the code, and then immediately use the `verify_implementation` tool to verify your changes work in the browser. Do not stop until the verification passes.'
-          }
-        }
-      ]
-    })
+            text: 'You are a TDD coding assistant. For every UI task, you must follow a strict process: write the code, and then immediately use the `verify_implementation` tool to verify your changes work in the browser. Do not stop until the verification passes.',
+          },
+        },
+      ],
+    }),
   );
 
   // ── Start stdio transport ────────────────────────────────
@@ -236,21 +269,26 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 async function launchTunnel(
   ctx: CliContext | undefined,
 ): Promise<{ tunnelId: string; cleanup: () => Promise<void> }> {
-  const { execSync, spawn } = await import('child_process');
+  const { spawn } = await import('child_process');
   const { WebSocket } = await import('ws');
 
   // Find Chrome
   const chromePath = findChrome();
-  if (!chromePath) throw new Error('Chrome not found. Install Google Chrome to use localhost verification.');
+  if (!chromePath)
+    throw new Error('Chrome not found. Install Google Chrome to use localhost verification.');
 
   // Launch Chrome with CDP
-  const chromeProc = spawn(chromePath, [
-    '--remote-debugging-port=9222',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--user-data-dir=/tmp/traceback-chrome-profile',
-    'about:blank',
-  ], { stdio: 'ignore', detached: true });
+  const chromeProc = spawn(
+    chromePath,
+    [
+      '--remote-debugging-port=9222',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--user-data-dir=/tmp/traceback-chrome-profile',
+      'about:blank',
+    ],
+    { stdio: 'ignore', detached: true },
+  );
 
   await new Promise((r) => setTimeout(r, 2000));
 
@@ -258,12 +296,15 @@ async function launchTunnel(
   const baseUrl = ctx?.infra.api.getAxiosInstance().defaults.baseURL || 'http://localhost:8000';
   const auth = ctx ? await ctx.infra.auth.getToken() : null;
   const token = auth?.accessToken || '';
-  const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://') + `/tunnel/connect?token=${token}`;
+  const wsUrl =
+    baseUrl.replace('https://', 'wss://').replace('http://', 'ws://') +
+    `/tunnel/connect?token=${token}`;
 
   const ws = new WebSocket(wsUrl);
 
   const tunnelId = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Tunnel connection timeout')), 10000);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ws message payload shape not modeled client-side
     ws.on('message', async (raw: any) => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === 'ready') {
@@ -275,7 +316,8 @@ async function launchTunnel(
             try {
               const res = await fetch('http://127.0.0.1:9222/json/version');
               if (res.ok) {
-                const data = await res.json() as any;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CDP /json/version response shape not modeled client-side
+                const data = (await res.json()) as any;
                 if (data && data.webSocketDebuggerUrl) {
                   cdpUrl = data.webSocketDebuggerUrl;
                   break;
@@ -293,12 +335,20 @@ async function launchTunnel(
         }
       }
     });
-    ws.on('error', (err: any) => { clearTimeout(timeout); reject(err); });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ws error shape not modeled client-side
+    ws.on('error', (err: any) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
   });
 
   const cleanup = async () => {
-    try { ws.close(); } catch {}
-    try { chromeProc.kill(); } catch {}
+    try {
+      ws.close();
+    } catch {}
+    try {
+      chromeProc.kill();
+    } catch {}
   };
 
   return { tunnelId, cleanup };

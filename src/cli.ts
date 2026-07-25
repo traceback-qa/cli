@@ -2,7 +2,6 @@
 import { Command } from 'commander';
 import { bootstrap } from './bootstrap.js';
 import { registerGlobalFlags, extractGlobalFlags } from './middleware/global-flags.js';
-import { handleError } from './errors/error.handler.js';
 import { BUILD_INFO } from './build-info.js';
 import {
   registerAuthCommands,
@@ -15,6 +14,7 @@ import {
   registerUpdateCommands,
   registerCompletionCommands,
   registerMcpCommands,
+  registerMobileCommands,
 } from './commands/index.js';
 import type { CliContext } from './types/context.js';
 
@@ -55,7 +55,14 @@ async function main(): Promise<void> {
   registerAuthCommands(program, getContext);
   registerWorkspaceCommands(program, getContext);
   registerTestCommands(program, getContext);
+  registerProjectCommands(program, getContext);
+  registerAgentCommands(program, getContext);
+  registerConfigCommands(program, getContext);
+  registerDoctorCommands(program, getContext);
+  registerUpdateCommands(program, getContext);
+  registerCompletionCommands(program, getContext);
   registerMcpCommands(program, getContext);
+  registerMobileCommands(program, getContext);
 
   program
     .command('login')
@@ -87,8 +94,10 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   if (error instanceof Error) {
+    // eslint-disable-next-line no-console -- last-resort fatal handler, no ctx/logger available here
     console.error(`Fatal error: ${error.message}`);
   } else {
+    // eslint-disable-next-line no-console -- last-resort fatal handler, no ctx/logger available here
     console.error(`Fatal error: ${String(error)}`);
   }
   process.exit(2);

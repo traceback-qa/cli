@@ -1,14 +1,23 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import { APP_NAME, CONFIG_FILE_NAME, AUTH_FILE_NAME, TELEMETRY_FILE_NAME, LOGS_DIR_NAME } from '../constants/paths.js';
+import {
+  APP_NAME,
+  CONFIG_FILE_NAME,
+  AUTH_FILE_NAME,
+  TELEMETRY_FILE_NAME,
+  LOGS_DIR_NAME,
+} from '../constants/paths.js';
 
 function getConfigHome(): string {
   switch (process.platform) {
     case 'darwin':
       return path.join(os.homedir(), 'Library', 'Application Support', APP_NAME);
     case 'win32':
-      return path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), APP_NAME);
+      return path.join(
+        process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'),
+        APP_NAME,
+      );
     default:
       return path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'), APP_NAME);
   }
@@ -19,9 +28,15 @@ function getDataHome(): string {
     case 'darwin':
       return path.join(os.homedir(), 'Library', 'Application Support', APP_NAME);
     case 'win32':
-      return path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'), APP_NAME);
+      return path.join(
+        process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'),
+        APP_NAME,
+      );
     default:
-      return path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'), APP_NAME);
+      return path.join(
+        process.env.XDG_DATA_HOME ?? path.join(os.homedir(), '.local', 'share'),
+        APP_NAME,
+      );
   }
 }
 
@@ -30,7 +45,11 @@ function getCacheHome(): string {
     case 'darwin':
       return path.join(os.homedir(), 'Library', 'Caches', APP_NAME);
     case 'win32':
-      return path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'), APP_NAME, 'Cache');
+      return path.join(
+        process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'),
+        APP_NAME,
+        'Cache',
+      );
     default:
       return path.join(process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), '.cache'), APP_NAME);
   }
@@ -80,6 +99,5 @@ export function ensureDir(dirPath: string): void {
 }
 
 function requireNodeFs() {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require('node:fs');
 }

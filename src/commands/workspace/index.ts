@@ -4,7 +4,8 @@ import type { getContext as GetContextFn } from '../../cli.js';
 type ContextGetter = typeof GetContextFn;
 
 interface Workspace {
-  id: string;
+  workspace_id?: string;
+  id?: string;
   name: string;
   plan?: string;
 }
@@ -26,7 +27,7 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
       const spinner = ctx.infra.ui.spinner('Fetching workspaces...');
       let workspaces: Workspace[];
       try {
-        const result = await ctx.infra.api.get<Workspace[]>('/workspaces');
+        const result = await ctx.infra.api.get<Workspace[]>('/api/v1/workspaces');
         workspaces = result.data;
         spinner.stop();
       } catch (error) {
@@ -46,15 +47,18 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
       const { select } = await import('@inquirer/prompts');
       const answer = await select({
         message: 'Select a workspace',
-        choices: workspaces.map((w) => ({
-          name: w.id === currentId ? `${w.name}  ← active` : w.name,
-          value: w.id,
-        })),
+        choices: workspaces.map((w) => {
+          const id = w.workspace_id ?? w.id ?? '';
+          return {
+            name: id === currentId ? `${w.name}  ← active` : w.name,
+            value: id,
+          };
+        }),
         default: currentId,
       });
 
       await ctx.infra.config.setGlobalConfig({ workspaceId: answer });
-      const selected = workspaces.find((w) => w.id === answer);
+      const selected = workspaces.find((w) => (w.workspace_id ?? w.id) === answer);
       ctx.infra.ui.success(`Active workspace: ${selected?.name ?? answer}`);
     });
 }
