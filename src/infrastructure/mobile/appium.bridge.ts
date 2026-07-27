@@ -150,13 +150,15 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
       switch (command) {
         case 'capture_state': {
-          // Take a screenshot and get the UI hierarchy
-          const [screenshot, source] = await Promise.all([
-            fetchJson(`${appiumUrl}/session/${appiumSessionId}/screenshot`),
-            fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`),
-          ]);
+          // Only the UI hierarchy is used server-side today — the screenshot isn't consumed
+          // anywhere yet (no visual-regression/recording pipeline for mobile), so skip fetching
+          // and JSON-parsing that multi-MB base64 payload on every single step. Add it back once
+          // something actually reads screenshot_b64.
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+          console.log('[Appium] Capturing screen state...');
+          const source = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`);
           result = {
-            screenshot_b64: screenshot?.value || '',
+            screenshot_b64: '',
             tree: source?.value || '',
             url: '',
             title: '',
