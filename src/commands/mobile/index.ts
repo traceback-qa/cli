@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import os from 'os';
 import { existsSync } from 'fs';
+import { registerMobileDevCommands } from './dev.js';
 
 type ContextGetter = (cmd: Command) => CliContext | undefined;
 
@@ -15,6 +16,11 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
   const mobile = program
     .command('mobile')
     .description('Mobile app verification — cloud-driven AI testing against a connected device');
+
+  // `dev`/`test` — Mode 1: a persistent cloud emulator + live-reload tunnel, registered as
+  // siblings of `verify` below rather than folded into it (different lifecycle entirely: one
+  // long-lived foreground session instead of a single provision-run-teardown call).
+  registerMobileDevCommands(mobile, getContext);
 
   mobile
     .command('verify')

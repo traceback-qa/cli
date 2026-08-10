@@ -9,3 +9,4 @@ export { registerUpdateCommands } from './update/index.js';
 export { registerCompletionCommands } from './completion/index.js';
 export { registerMcpCommands } from './mcp/index.js';
 export { registerMobileCommands } from './mobile/index.js';
+export { registerSetupCommands } from './setup/index.js';

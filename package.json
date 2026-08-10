@@ -1,7 +1,27 @@
 {
-  "name": "traceback",
-  "version": "0.1.0",
-  "description": "Production-grade CLI for Traceback — trace, debug, and fix production issues",
+  "name": "@tracebackai/cli",
+  "version": "1.0.1",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Run and watch Traceback AI browser/mobile tests from your terminal",
+  "keywords": [
+    "traceback",
+    "qa",
+    "testing",
+    "e2e",
+    "browser-testing",
+    "mobile-testing",
+    "ai-agent",
+    "cli",
+    "mcp"
+  ],
+  "homepage": "https://docs.traceback.dev",
+  "bugs": "https://github.com/TracebackAI/cli/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TracebackAI/cli.git"
+  },
   "license": "MIT",
   "author": "Traceback Team",
   "type": "module",
@@ -9,7 +29,7 @@
   "module": "./dist/cli.js",
   "types": "./dist/cli.d.ts",
   "bin": {
-    "traceback": "./dist/cli.js"
+    "traceback": "dist/cli.js"
   },
   "files": [
     "dist"
@@ -46,6 +66,7 @@
     "pino": "^9.1.0",
     "pino-pretty": "^11.1.0",
     "socket.io-client": "^4.8.3",
+    "traceback": "link:",
     "ws": "^8.21.0",
     "zod": "^3.23.8"
   },

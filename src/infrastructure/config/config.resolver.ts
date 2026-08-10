@@ -4,8 +4,13 @@ import { GlobalConfigSchema } from './config.schema.js';
 import { DEFAULT_API_URL } from '../../constants/urls.js';
 import { getEnvFlag, getEnvBoolFlag } from '../../platform/process.js';
 
-// Load .env file so TRACEBACK_API_URL etc. are available in process.env
-loadDotenv();
+// Load .env file so TRACEBACK_API_URL etc. are available in process.env.
+// `quiet: true` -- dotenv's own load banner prints to stdout by default, which corrupts any
+// stdio-framed protocol reading this process's stdout as a pure message stream (the `mcp`
+// command's JSON-RPC transport is the concrete case that surfaced this: this module loads at
+// import time, before command dispatch, so `mcp/index.ts`'s own "suppress all output" comment
+// never gets a chance to act -- the banner is already on stdout before that code runs).
+loadDotenv({ quiet: true });
 
 const DEFAULTS: GlobalConfig = {
   apiUrl: DEFAULT_API_URL,

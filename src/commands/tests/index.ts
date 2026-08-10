@@ -93,40 +93,33 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
       const selected = tests.find((t) => t.id === testId);
       if (!selected) return;
 
-      // Step 4: Ask what to do with the selected test
+      // Step 4: Run the selected test
       if (platform === 'mobile') {
         // ── Mobile: detect devices, let user pick one ──
         await handleMobileTest(ctx, workspaceId, testId, selected);
       } else {
-        // ── Web: cloud or local Chrome ──
-        const action = await select({
-          message: `${selected.name}`,
-          choices: [
-            { name: '▶  Run in cloud', value: 'cloud' },
-            { name: '💻  Run locally (opens Chrome)', value: 'local' },
-            { name: '📋  View details', value: 'details' },
-          ],
-        });
-
-        if (action === 'cloud' || action === 'local') {
-          const envs = Object.keys(selected.environments || {});
-          let environment = 'production';
-          if (envs.length > 0) {
-            environment = await select({
-              message: 'Select an environment',
-              choices: envs.map((e) => ({ name: e, value: e })),
-              default: envs.includes('production') ? 'production' : envs[0],
-            });
-          }
-
-          if (action === 'cloud') {
-            await runInCloud(ctx, workspaceId, testId, selected.name, environment);
-          } else {
-            await runLocally(ctx, workspaceId, testId, selected.name, environment);
-          }
-        } else if (action === 'details') {
-          showDetails(ctx, selected);
+        // ── Web: environment (if applicable), then straight into a cloud run --
+        // no cloud/local/details menu in between. `runInCloud` itself asks "Watch this run
+        // live?" and streams events when the answer is yes. Local Chrome (CDP tunnel) and the
+        // static details view still exist (`runLocally`/`showDetails` below) for whatever picks
+        // them back up later -- they're just not reachable from this flow anymore.
+        const envs = Object.keys(selected.environments || {});
+        // A single-choice select prompt has nothing to actually decide -- it just makes the
+        // user press Enter through a list with one item in it, which reads as "did this even
+        // ask me anything?" rather than a real environment choice. Only prompt when there's
+        // more than one to pick between; with exactly one, use it directly and say so.
+        let environment = envs[0] || 'production';
+        if (envs.length > 1) {
+          environment = await select({
+            message: 'Select an environment',
+            choices: envs.map((e) => ({ name: e, value: e })),
+            default: envs.includes('production') ? 'production' : envs[0],
+          });
+        } else if (envs.length === 1) {
+          ctx.infra.ui.hint(`Environment: ${environment}`);
         }
+
+        await runInCloud(ctx, workspaceId, testId, selected.name, environment);
       }
     });
 }
@@ -141,17 +134,52 @@ async function runInCloud(
   testName: string,
   environment: string,
 ): Promise<void> {
+  // Asked before the run is dispatched, not after -- answering this while a run has already
+  // silently started server-side (the previous shape: start, print "Run started", then ask) felt
+  // like the CLI didn't wait for input at all.
+  const { confirm } = await import('@inquirer/prompts');
+  const watchLive = await confirm({ message: 'Watch this run live?', default: true });
+
   const spinner = ctx.infra.ui.spinner(`Starting cloud run for "${testName}"...`);
+  let runId: string;
   try {
     const result = await ctx.infra.api.post<{ run_id: string }>(
       `/api/v1/workspaces/${workspaceId}/tests/${testId}/run`,
       { environment, viewport: 'desktop' },
     );
-    spinner.succeed(`Run started: ${result.data.run_id}`);
-    ctx.infra.ui.hint('View results at traceback.dev or use `traceback runs`');
+    runId = result.data.run_id;
+    spinner.succeed(`Run started: ${runId}`);
   } catch (error) {
     spinner.fail('Failed to start run');
     throw error;
+  }
+
+  if (!watchLive) {
+    ctx.infra.ui.hint('View results at traceback.dev or use `traceback runs`');
+    return;
+  }
+
+  const { watchRun } = await import('../../infrastructure/socket/run-events.client.js');
+  const token = await ctx.infra.auth.getToken();
+  if (!token) {
+    ctx.infra.ui.warn('Not authenticated — cannot open a live stream.');
+    ctx.infra.ui.hint(`View results at traceback.dev, or run \`traceback runs\` for run ${runId}`);
+    return;
+  }
+
+  const config = await ctx.infra.config.loadGlobalConfig();
+  const controller = new AbortController();
+  const onSigint = (): void => {
+    ctx.infra.ui.info('\nStopped watching (the run itself keeps going in the cloud).');
+    controller.abort();
+  };
+  process.on('SIGINT', onSigint);
+
+  try {
+    ctx.infra.ui.hint('Press Ctrl+C to stop watching (the run keeps going either way).');
+    await watchRun(config.apiUrl, token.accessToken, runId, ctx.infra.ui, controller.signal);
+  } finally {
+    process.off('SIGINT', onSigint);
   }
 }
 
@@ -168,7 +196,7 @@ async function runInCloud(
  *   7. User watches it happen live in their Chrome window
  *   8. Clean up: close tunnel and Chrome when done
  */
-async function runLocally(
+export async function runLocally(
   ctx: CliContext,
   workspaceId: string,
   testId: string,
@@ -343,6 +371,7 @@ async function handleMobileTest(
   } catch (error: any) {
     bridgeSpinner.fail(`Failed to connect: ${error.message}`);
     ctx.infra.ui.hint('Make sure Appium is running: `appium`');
+    ctx.infra.ui.hint('Missing Appium or a driver? Run `traceback setup`.');
     return;
   }
 
