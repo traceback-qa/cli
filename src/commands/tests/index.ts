@@ -395,7 +395,7 @@ async function handleMobileTest(
     // Keep alive while the agent controls the device
     await new Promise<void>((resolve) => {
       process.on('SIGINT', () => {
-        ctx.infra.ui.info('\nStopping...');
+        ctx.infra.ui.info('\\nStopping...');
         resolve();
       });
       setTimeout(resolve, 300_000);

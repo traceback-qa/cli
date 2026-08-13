@@ -5,7 +5,7 @@
  *   1. The CLI connects to the backend via Socket.IO
  *   2. The backend agent sends commands (tap, type, swipe, screenshot)
  *   3. This bridge receives those commands and executes them via Appium
- *   4. Results (screenshots, UI trees, action outcomes) are sent back
+ *   4. Results (screenshots and action outcomes) are sent back
  *
  * The bridge attaches to whatever app is currently open on the device —
  * it doesn't launch or install anything. The user opens their app first,
@@ -14,10 +14,15 @@
  * Requires: Appium server running (`appium` command) and a device/emulator.
  */
 
+/* The mobile wire protocol is intentionally dynamic; the bridge is also the CLI's progress UI. */
+/* eslint-disable no-console */
+
 import { io, type Socket } from 'socket.io-client';
 import http from 'http';
 import { spawn, type ChildProcess, execSync } from 'child_process';
 import fs from 'fs/promises';
+
+const MAX_SCREENSHOT_BASE64_LENGTH = 8 * 1024 * 1024;
 
 export interface AppiumBridgeOptions {
   /** Backend API base URL (e.g. http://localhost:8000/api/v1) */
@@ -154,43 +159,73 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
       switch (command) {
         case 'capture_state': {
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log('[Appium] Capturing screen state...');
-          const source = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`);
+          // Vision-only capture: never call `/source`. Maps and third-party widgets can make
+          // the accessibility hierarchy slow or incomplete, while the screenshot is reliable.
           const screenshot = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/screenshot`);
+          const screenshotB64 = String(screenshot?.value || '');
+          if (!screenshotB64 || screenshotB64.length > MAX_SCREENSHOT_BASE64_LENGTH) {
+            throw new Error('Appium screenshot is empty or exceeds the transport limit');
+          }
           result = {
-            screenshot_b64: screenshot?.value || '',
-            tree: source?.value || '',
+            screenshot_b64: screenshotB64,
+            media_type: 'image/png',
             url: '',
             title: '',
           };
           break;
         }
 
-        case 'execute_action': {
-          const { action, target, value, resolved } = cmdData;
-          /* eslint-disable no-console -- direct user-facing terminal output for live action progress */
-          console.log(
-            `[Appium] ${action} → ${target?.what || 'no target'} (value: ${value || 'none'})`,
-          );
-          if (resolved?.strategy) {
-            console.log(`[Appium] LLM resolved: ${resolved.strategy} = "${resolved.locator}"`);
+        case 'capture_page_source': {
+          // Optional Set-of-Mark grounding fetch -- bounded so a slow/hung `/source` call on a
+          // map, canvas surface, or React Native/Flutter screen with an incomplete accessibility
+          // tree can never stall the perception loop. A timeout or any other failure resolves as
+          // `{ page_source: '' }`, never an error, so the backend's own fallback (plain
+          // pure-pixel reasoning, exactly today's behavior) always has a clean signal to act on.
+          const timeoutMs = Math.round(Number(cmdData?.timeout_seconds ?? 1.2) * 1000);
+          try {
+            const source = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`, {
+              timeoutMs,
+            });
+            result = { page_source: String(source?.value || '') };
+          } catch (e) {
+            console.log(`[Appium] Set-of-Mark grounding fetch skipped: ${(e as Error).message}`);
+            result = { page_source: '' };
           }
+          break;
+        }
+
+        case 'get_screen_size': {
+          const size = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/window/size`);
+          result = {
+            width: Number(size?.value?.width || 400),
+            height: Number(size?.value?.height || 800),
+          };
+          break;
+        }
+
+        case 'execute_action': {
+          const { action, target, value, clear_first: clearFirst } = cmdData;
+          console.log(
+            `[Appium] ${action} → ${target?.what || 'coordinate target'}${
+              value != null ? ' (value provided)' : ''
+            }`,
+          );
           result = await executeAppiumAction(
             appiumUrl,
             appiumSessionId,
             action,
             target,
             value,
-            resolved,
-            opts.platform
+            null,
+            opts.platform,
+            clearFirst !== false,
           );
           if (result.error) {
             console.log(`[Appium] ✗ ${result.error}`);
           } else {
             console.log(`[Appium] ✓ ${result.result}`);
           }
-          /* eslint-enable no-console */
           break;
         }
 
@@ -278,6 +313,7 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
             recordingProcess.stderr?.on('data', () => {});
             
             result = { result: 'Started recording natively' };
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           } catch (e: any) {
             console.error('[Native] Error starting recording:', e);
             result = { error: `Failed to start recording: ${e.message}` };
@@ -316,6 +352,7 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
             
             // Cleanup local file
             await fs.unlink(recordingPath).catch(() => {});
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           } catch (e: any) {
             console.error('[Native] Error retrieving recording:', e);
             result = { video_b64: '' };
@@ -356,25 +393,89 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 }
 
 /**
- * Execute a single action on the device via Appium WebDriver.
- */
-/**
  * Execute an action on the device via Appium.
  *
- * If `resolved` is provided (from the LLM element resolver), it contains
- * a precise Appium locator (strategy + value). This is much more reliable
- * than trying to match element descriptions with string manipulation.
+ * The active implementation is coordinate-only. The unused legacy locator parameter remains
+ * solely for wire compatibility with older callers and is intentionally ignored.
  */
+async function waitForStableScreen(base: string, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + Math.max(100, Math.min(timeoutMs, 5000));
+  let previous = '';
+  while (Date.now() < deadline) {
+    const screenshot = await fetchJson(`${base}/screenshot`);
+    const current = String(screenshot?.value || '');
+    if (current && current === previous) return;
+    previous = current;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+async function pinchAt(base: string, x: number, y: number, scale: string): Promise<void> {
+  if (scale !== 'in' && scale !== 'out') throw new Error("pinch scale must be 'in' or 'out'");
+  const size = await fetchJson(`${base}/window/size`);
+  const distance = Math.min(Number(size?.value?.width) || 1080, Number(size?.value?.height) || 1920) * 0.12;
+  const direction = scale === 'in' ? 1 : -1;
+  await fetchJson(`${base}/actions`, {
+    method: 'POST',
+    body: JSON.stringify({
+      actions: [
+        {
+          type: 'pointer',
+          id: 'finger1',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(x - distance), y: Math.round(y) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pause', duration: 100 },
+            { type: 'pointerMove', duration: 350, x: Math.round(x - direction * distance), y: Math.round(y) },
+            { type: 'pointerUp', button: 0 },
+          ],
+        },
+        {
+          type: 'pointer',
+          id: 'finger2',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(x + distance), y: Math.round(y) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pause', duration: 100 },
+            { type: 'pointerMove', duration: 350, x: Math.round(x + direction * distance), y: Math.round(y) },
+            { type: 'pointerUp', button: 0 },
+          ],
+        },
+      ],
+    }),
+  });
+}
+
+async function clearActiveElement(base: string): Promise<void> {
+  // Resolves whatever currently has focus via Appium's active-element endpoint -- no selector
+  // involved, so this stays consistent with the vision-only design never holding a persisted
+  // element reference across turns. Best-effort: a field that can't be cleared (or no element
+  // currently focused) still gets typed into by the caller right after this.
+  try {
+    const active = await fetchJson(`${base}/element/active`);
+    const elementId =
+      active?.value?.ELEMENT || active?.value?.['element-6066-11e4-a52e-4f735466cecf'];
+    if (elementId) {
+      await fetchJson(`${base}/element/${elementId}/clear`, { method: 'POST', body: '{}' });
+    }
+  } catch {
+    // Swallow -- clearing is an optional precursor to typing, never a hard requirement.
+  }
+}
+
 async function executeAppiumAction(
   appiumUrl: string,
   sessionId: string,
   action: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- target descriptor shape varies by action type
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   target: any,
   value: string | null,
-  resolved?: { strategy?: string; locator?: string } | null,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result shape varies by action type
+  _legacyResolved?: { strategy?: string; locator?: string } | null,
   platform?: 'android' | 'ios',
+  clearFirst = true,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Promise<any> {
   const base = `${appiumUrl}/session/${sessionId}`;
 
@@ -407,12 +508,7 @@ async function executeAppiumAction(
       return { result: `Tapped coordinates [${Math.round(x)}, ${Math.round(y)}]` };
     }
 
-    const element = resolved?.strategy
-      ? await tryFind(base, resolved.strategy, resolved.locator!)
-      : await findElement(base, target);
-    if (!element) return { error: `Element not found: ${target?.what || 'unknown'}` };
-    await fetchJson(`${base}/element/${element}/click`, { method: 'POST', body: '{}' });
-    return { result: `Tapped ${target?.what || 'element'}` };
+    return { error: 'Vision tap requires screenshot bounds [x, y]. Selectors are disabled.' };
   }
 
   if (action === 'type' || action === 'fill') {
@@ -442,6 +538,12 @@ async function executeAppiumAction(
           }]
         })
       });
+      // Clearing after the tap-to-focus above and before typing is the common case: setting a
+      // field's value, not appending to whatever it already held (confirmed live -- typing into
+      // a pre-filled "My Location" field without clearing first produced concatenated garbage).
+      if (clearFirst) {
+        await clearActiveElement(base);
+      }
       // Then type
       await fetchJson(`${base}/actions`, {
         method: 'POST',
@@ -459,6 +561,9 @@ async function executeAppiumAction(
 
     if (!target || Object.keys(target).length === 0) {
       // Type into active element
+      if (clearFirst) {
+        await clearActiveElement(base);
+      }
       await fetchJson(`${base}/actions`, {
         method: 'POST',
         body: JSON.stringify({
@@ -475,29 +580,96 @@ async function executeAppiumAction(
       return { result: `Typed '${value}'` };
     }
 
-    const element = resolved?.strategy
-      ? await tryFind(base, resolved.strategy, resolved.locator!)
-      : await findElement(base, target);
-    if (!element) return { error: `Element not found: ${target?.what || 'unknown'}` };
-    await fetchJson(`${base}/element/${element}/clear`, { method: 'POST', body: '{}' });
-    await fetchJson(`${base}/element/${element}/value`, {
-      method: 'POST',
-      body: JSON.stringify({ text: value || '' }),
-    });
-    return { result: `Typed '${value}' into ${target?.what || 'element'}` };
+    return { error: 'Vision type requires screenshot bounds [x, y]. Selectors are disabled.' };
   }
 
-  if (action === 'swipe' || action === 'scroll') {
-    const direction = target?.context || 'down';
-    // Use Appium's mobile:scroll gesture
-    await fetchJson(`${base}/execute/sync`, {
+  if (action === 'long_press') {
+    if (!target?.bounds || target.bounds.length !== 2) {
+      return { error: 'Vision long_press requires coordinate bounds [x, y].' };
+    }
+    const [x, y] = target.bounds;
+    await fetchJson(`${base}/actions`, {
       method: 'POST',
       body: JSON.stringify({
-        script: 'mobile:scroll',
-        args: [{ direction }],
+        actions: [{
+          type: 'pointer',
+          id: 'finger1',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pause', duration: Math.max(100, Math.min(Number(value) || 800, 5000)) },
+            { type: 'pointerUp', button: 0 },
+          ],
+        }],
       }),
     });
-    return { result: `Scrolled ${direction}` };
+    return { result: 'Long-pressed coordinate' };
+  }
+
+  if (action === 'pinch_zoom') {
+    if (!target?.bounds || target.bounds.length !== 2) {
+      return { error: 'Vision pinch_zoom requires coordinate bounds [x, y].' };
+    }
+    await pinchAt(base, Number(target.bounds[0]), Number(target.bounds[1]), String(value));
+    return { result: `Pinched to zoom ${value}` };
+  }
+
+  if (action === 'wait' || action === 'wait_for_stable') {
+    await waitForStableScreen(base, Number(value || 2000));
+    return { result: 'Waited for visual stability' };
+  }
+
+  if (action === 'swipe' || action === 'scroll' || action === 'drag') {
+    const direction = target?.context || 'down';
+    const size = await fetchJson(`${base}/window/size`);
+    const width = Number(size?.value?.width) || 1080;
+    const height = Number(size?.value?.height) || 1920;
+
+    let startX = target?.from_bounds?.[0];
+    let startY = target?.from_bounds?.[1];
+    let endX = target?.to_bounds?.[0];
+    let endY = target?.to_bounds?.[1];
+    if ([startX, startY, endX, endY].some((coordinate) => coordinate === undefined)) {
+      const marginX = Math.round(width * 0.1);
+      const marginY = Math.round(height * 0.15);
+      startX = width / 2;
+      startY = height / 2;
+      endX = width / 2;
+      endY = height / 2;
+      if (direction === 'up') {
+        startY = height - marginY;
+        endY = marginY;
+      } else if (direction === 'down') {
+        startY = marginY;
+        endY = height - marginY;
+      } else if (direction === 'left') {
+        startX = width - marginX;
+        endX = marginX;
+      } else if (direction === 'right') {
+        startX = marginX;
+        endX = width - marginX;
+      }
+    }
+
+    await fetchJson(`${base}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        actions: [{
+          type: 'pointer',
+          id: 'finger1',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(startX), y: Math.round(startY) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pause', duration: 100 },
+            { type: 'pointerMove', duration: 250, x: Math.round(endX), y: Math.round(endY) },
+            { type: 'pointerUp', button: 0 },
+          ],
+        }],
+      }),
+    });
+    return { result: `Swiped ${direction}` };
   }
 
   if (action === 'press_key') {
@@ -551,6 +723,9 @@ async function executeAppiumAction(
 }
 
 /**
+ * Deprecated selector helpers retained for old non-agent callers; the vision action dispatcher
+ * above never invokes them. They should be removed once legacy bridge consumers are gone.
+ *
  * Find an element using Appium's WebDriver find strategies.
  * Tries accessibility id first, then text content, then xpath.
  */
@@ -569,7 +744,7 @@ async function executeAppiumAction(
  * but the actual iOS element label is just "Add". We try the full string
  * first, then progressively shorter/simpler versions.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- target descriptor shape varies by action type
+// eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
 async function findElement(baseUrl: string, target: any): Promise<string | null> {
   const what = target?.what || '';
 
@@ -686,9 +861,18 @@ async function tryFind(baseUrl: string, strategy: string, value: string): Promis
 
 /**
  * Simple fetch wrapper for Appium WebDriver HTTP API.
+ *
+ * `timeoutMs`, when given, bounds this one request and rejects on expiry instead of hanging --
+ * used by the optional Set-of-Mark grounding fetch (`/source` can be slow or hang on maps,
+ * canvas surfaces, and React Native/Flutter screens with an incomplete accessibility tree, which
+ * is exactly why the vision-only agent never called it unconditionally). Every other call site
+ * omits it and keeps today's unbounded behavior.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic WebDriver JSON response shape not modeled client-side
-async function fetchJson(url: string, options?: { method?: string; body?: string }): Promise<any> {
+async function fetchJson(
+  url: string,
+  options?: { method?: string; body?: string; timeoutMs?: number },
+): Promise<any> {
   return await new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const req = http.request(
@@ -714,6 +898,11 @@ async function fetchJson(url: string, options?: { method?: string; body?: string
       },
     );
     req.on('error', reject);
+    if (options?.timeoutMs) {
+      req.setTimeout(options.timeoutMs, () => {
+        req.destroy(new Error(`Appium request timed out after ${options.timeoutMs}ms`));
+      });
+    }
     if (options?.body) req.write(options.body);
     req.end();
   });

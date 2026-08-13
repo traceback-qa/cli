@@ -9,7 +9,7 @@ import { registerMobileDevCommands } from './dev.js';
 
 type ContextGetter = (cmd: Command) => CliContext | undefined;
 
-const MAX_STEPS = 15;
+const MAX_STEPS = 20;
 const DEFAULT_APPIUM_URL = 'http://localhost:4723';
 
 export function registerMobileCommands(program: Command, getContext: ContextGetter): void {
@@ -26,7 +26,7 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
     .command('verify')
     .description(
       'Verify a mobile app against a natural-language goal.\n' +
-        'The backend runs the AI agent in the cloud. The CLI sends screen XML\n' +
+        'The backend runs the AI agent in the cloud. The CLI sends screenshots only\n' +
         'and executes returned gestures locally via Appium.',
     )
     .requiredOption('-g, --goal <text>', 'Natural-language verification goal')
@@ -71,7 +71,7 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
         ui.error(
           'Could not find the Python mobile relay script.\n' +
             'Clone the backend repo next to the CLI repo, or set TRACEBACK_BACKEND_PATH.\n' +
-            'Expected: backend/scripts/mobile_relay.py',
+            'Expected: backend/scripts/mobile_relay.py (vision-only screenshot relay)',
         );
         return;
       }
@@ -210,9 +210,10 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
 
       try {
         for (stepIndex = 0; stepIndex < MAX_STEPS; stepIndex++) {
-          // a. Extract screen state
+          // a. Capture the raw screen. The vision-only contract intentionally never asks
+          // Appium for page source/XML, which is unreliable for maps and third-party widgets.
           const stepSpinner = ui.spinner(`Step ${stepIndex + 1}/${MAX_STEPS} — reading screen...`);
-          sendRelay({ cmd: 'page_source' });
+          sendRelay({ cmd: 'screenshot' });
           const pageResult = await readRelay();
 
           if (!pageResult.ok) {
@@ -226,14 +227,18 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
           // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mobile-step response shape not modeled client-side
           const stepRes = await api.post<any>(`/api/v1/workspaces/${workspaceId}/mcp/mobile-step`, {
             run_id: runId,
-            xml: pageResult.xml,
+            screenshot_base64: pageResult.screenshot_b64,
+            screenshot_width: pageResult.screenshot_width,
+            screenshot_height: pageResult.screenshot_height,
+            media_type: pageResult.media_type || 'image/png',
+            screen_width: pageResult.screen_width,
+            screen_height: pageResult.screen_height,
             step_index: stepIndex,
             history,
           });
 
           const decision = stepRes.data.decision;
           const done = stepRes.data.done;
-
           if (done) {
             stepSpinner.succeed(
               `Step ${stepIndex + 1}: done — ${decision.reasoning || 'goal complete'}`,
@@ -246,7 +251,14 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
           stepSpinner.setText(
             `Step ${stepIndex + 1}/${MAX_STEPS} — ${decision.tool} ${decision.ref || ''}`,
           );
-          sendRelay({ cmd: 'execute', decision });
+          sendRelay({
+            cmd: 'execute',
+            decision,
+            screenshot_width: pageResult.screenshot_width,
+            screenshot_height: pageResult.screenshot_height,
+            screen_width: pageResult.screen_width,
+            screen_height: pageResult.screen_height,
+          });
           const execResult = await readRelay();
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any -- step entry combines decision + relay result, no shared shape modeled
