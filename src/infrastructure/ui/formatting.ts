@@ -1,5 +1,6 @@
 /* eslint-disable no-console -- this module IS the CLI's terminal output layer */
 import chalk from 'chalk';
+import boxen from 'boxen';
 import type { UIService, SpinnerHandle, UIOptions } from './ui.types.js';
 
 export function createUIService(opts: UIOptions): UIService {
@@ -80,7 +81,6 @@ export function createUIService(opts: UIOptions): UIService {
 
     box(content: string, optsBox?: { title?: string }): void {
       if (opts.json) return;
-      const boxen = requireBoxen();
       const output = boxen(content, {
         padding: 1,
         margin: 1,
@@ -92,7 +92,11 @@ export function createUIService(opts: UIOptions): UIService {
     },
 
     renderJson(data: unknown): void {
-      console.log(JSON.stringify(data, null, 2));
+      // Compact single-line JSON: machine consumers (the MCP server, `mobile verify`
+      // parsing) read stdout line-by-line as JSONL — one object per line. Pretty-
+      // printing across multiple lines would break `json.loads(line)` on every
+      // partial line.
+      console.log(JSON.stringify(data));
     },
 
     isJsonMode(): boolean {
@@ -207,6 +211,3 @@ function padCenter(str: string, width: number): string {
   return ' '.repeat(left) + str + ' '.repeat(right);
 }
 
-function requireBoxen(): (content: string, opts?: Record<string, unknown>) => string {
-  return require('boxen');
-}

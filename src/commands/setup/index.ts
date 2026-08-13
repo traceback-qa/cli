@@ -10,6 +10,9 @@
  * What this does and doesn't install:
  *   - Appium itself + the uiautomator2/xcuitest drivers: installed here (`npm install -g`, then
  *     `appium driver install`), since those are just npm packages this CLI can safely run.
+ *   - ffmpeg: installed here too — a static build downloaded into the Traceback data dir (no
+ *     brew/package manager needed). iOS screen recording encodes with it; Android records
+ *     on-device and doesn't need it.
  *   - Android platform-tools (`adb`) / Xcode Command Line Tools (`xcrun`): only detected, never
  *     auto-installed. These are multi-gigabyte, often-interactive installs (Android Studio,
  *     Xcode from the App Store) — the responsible move is pointing at the real installer, not
@@ -18,8 +21,11 @@
 
 import type { Command } from 'commander';
 import { execSync, spawn } from 'child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { UIService } from '../../infrastructure/ui/ui.types.js';
+import { getDataDir } from '../../platform/paths.js';
 
 type ContextGetter = typeof GetContextFn;
 
@@ -42,6 +48,7 @@ export function registerSetupCommands(program: Command, getContext: ContextGette
 
       await ensureAppium(ui, options.yes);
       await ensureDrivers(ui, options.yes);
+      await ensureFfmpeg(ui, options.yes);
       checkAndroidSdk(ui);
       checkXcode(ui);
 
@@ -49,7 +56,7 @@ export function registerSetupCommands(program: Command, getContext: ContextGette
     });
 }
 
-function commandExists(cmd: string): boolean {
+export function commandExists(cmd: string): boolean {
   try {
     execSync(`${cmd} --version`, { stdio: 'pipe', timeout: 5000 });
     return true;
@@ -60,7 +67,7 @@ function commandExists(cmd: string): boolean {
 
 /** Run a command with output streamed straight to the terminal (npm/appium installs are slow
  * and users should see real progress, not a silent spinner). Resolves to the exit code. */
-async function runStreamed(command: string, args: string[]): Promise<number> {
+export async function runStreamed(command: string, args: string[]): Promise<number> {
   return await new Promise((resolve) => {
     const child = spawn(command, args, { stdio: 'inherit' });
     child.on('error', () => resolve(1));
@@ -68,7 +75,7 @@ async function runStreamed(command: string, args: string[]): Promise<number> {
   });
 }
 
-async function ensureAppium(ui: UIService, skipConfirm: boolean): Promise<void> {
+export async function ensureAppium(ui: UIService, skipConfirm: boolean): Promise<void> {
   if (commandExists('appium')) {
     const version = execSync('appium --version', { encoding: 'utf-8' }).trim();
     ui.success(`Appium already installed (${version})`);
@@ -112,7 +119,7 @@ function listInstalledDrivers(): Set<string> {
   }
 }
 
-async function ensureDrivers(ui: UIService, skipConfirm: boolean): Promise<void> {
+export async function ensureDrivers(ui: UIService, skipConfirm: boolean): Promise<void> {
   if (!commandExists('appium')) return; // nothing to install drivers into
 
   const installed = listInstalledDrivers();
@@ -150,6 +157,99 @@ async function ensureDrivers(ui: UIService, skipConfirm: boolean): Promise<void>
       ui.error(`Failed to install driver: ${driver.label} — see the output above.`);
     }
   }
+}
+
+const FFMPEG_RELEASE_BASE =
+  'https://github.com/eugeneware/ffmpeg-static/releases/latest/download';
+
+/** Static ffmpeg release asset for the current platform/arch, or null if none is published. */
+export function ffmpegAssetName(): string | null {
+  const assets: Record<string, string> = {
+    'darwin/arm64': 'ffmpeg-darwin-arm64',
+    'darwin/x64': 'ffmpeg-darwin-x64',
+    'linux/x64': 'ffmpeg-linux-x64',
+    'linux/arm64': 'ffmpeg-linux-arm64',
+    'win32/x64': 'ffmpeg-win32-x64',
+    'win32/ia32': 'ffmpeg-win32-ia32',
+  };
+  return assets[`${process.platform}/${process.arch}`] ?? null;
+}
+
+export function ffmpegBinPath(): string {
+  return path.join(getDataDir(), 'bin', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+}
+
+export function printFfmpegPathHint(ui: UIService, binDir: string): void {
+  if (process.platform === 'win32') {
+    ui.hint(`Add ${binDir} to your PATH so Appium can find ffmpeg.`);
+  } else {
+    ui.hint(`Add it to your shell profile so Appium can find it: export PATH="${binDir}:$PATH"`);
+  }
+}
+
+/** iOS screen recording needs ffmpeg on the Appium machine (XCUITest encodes with it); Android
+ * records on-device and needs nothing. Installs a static build into the Traceback data dir so
+ * no brew/package manager is required. */
+export async function ensureFfmpeg(ui: UIService, skipConfirm: boolean): Promise<void> {
+  if (commandExists('ffmpeg')) {
+    const version = execSync('ffmpeg --version', { encoding: 'utf-8' }).trim().split('\n')[0];
+    ui.success(`ffmpeg already installed (${version})`);
+    return;
+  }
+
+  const asset = ffmpegAssetName();
+  if (!asset) {
+    ui.warn(
+      `No prebuilt ffmpeg available for ${process.platform}/${process.arch} — install it manually so iOS runs can record video.`,
+    );
+    return;
+  }
+
+  const binPath = ffmpegBinPath();
+  const binDir = path.dirname(binPath);
+  if (fs.existsSync(binPath)) {
+    ui.success(`ffmpeg already installed (${binPath})`);
+    printFfmpegPathHint(ui, binDir);
+    return;
+  }
+
+  ui.warn('ffmpeg not found — needed for iOS screen recordings (Android records on-device, no ffmpeg needed).');
+  if (!skipConfirm) {
+    const { confirm } = await import('@inquirer/prompts');
+    const install = await confirm({
+      message:
+        'Download a static ffmpeg build into the Traceback data dir (no brew/package manager needed)?',
+      default: true,
+    });
+    if (!install) {
+      ui.hint("Skipped. iOS runs will pass but won't include a screen recording.");
+      return;
+    }
+  }
+
+  ui.info('Downloading static ffmpeg...');
+  fs.mkdirSync(binDir, { recursive: true });
+  try {
+    const res = await fetch(`${FFMPEG_RELEASE_BASE}/${asset}`, {
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    await fs.promises.writeFile(binPath, Buffer.from(await res.arrayBuffer()));
+    if (process.platform !== 'win32') fs.chmodSync(binPath, 0o755);
+  } catch (err) {
+    ui.error(`ffmpeg download failed: ${err instanceof Error ? err.message : String(err)}`);
+    ui.hint('Retry `traceback setup` later, or install ffmpeg yourself.');
+    return;
+  }
+
+  try {
+    const version = execSync(`"${binPath}" -version`, { encoding: 'utf-8' }).trim().split('\n')[0];
+    ui.success(`ffmpeg installed (${version})`);
+  } catch {
+    ui.error(`ffmpeg was downloaded to ${binPath} but couldn't run — try installing it manually.`);
+    return;
+  }
+  printFfmpegPathHint(ui, binDir);
 }
 
 function checkAndroidSdk(ui: UIService): void {

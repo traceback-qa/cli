@@ -194,6 +194,15 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
           break;
         }
 
+        case 'get_screen_size': {
+          const size = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/window/size`);
+          result = {
+            width: Number(size?.value?.width || 400),
+            height: Number(size?.value?.height || 800),
+          };
+          break;
+        }
+
         case 'goto': {
           // For mobile, "goto" means open a deep link or URL
           const url = cmdData.url || '';
@@ -413,6 +422,54 @@ async function executeAppiumAction(
     if (!element) return { error: `Element not found: ${target?.what || 'unknown'}` };
     await fetchJson(`${base}/element/${element}/click`, { method: 'POST', body: '{}' });
     return { result: `Tapped ${target?.what || 'element'}` };
+  }
+
+  if (action === 'long_press') {
+    if (!target?.bounds) return { error: 'Long-press target has no coordinates' };
+    const [x, y] = target.bounds.length === 2
+      ? target.bounds
+      : [target.bounds[0] + target.bounds[2] / 2, target.bounds[1] + target.bounds[3] / 2];
+    const duration = Math.max(300, Number(value || 800));
+    await fetchJson(`${base}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        actions: [{ type: 'pointer', id: 'finger1', parameters: { pointerType: 'touch' }, actions: [
+          { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pause', duration },
+          { type: 'pointerUp', button: 0 },
+        ] }],
+      }),
+    });
+    return { result: `Long-pressed coordinates [${Math.round(x)}, ${Math.round(y)}] for ${duration}ms` };
+  }
+
+  if (action === 'drag') {
+    const from = target?.from_bounds;
+    const to = target?.to_bounds;
+    if (!from || !to) return { error: 'Drag target has no start/end coordinates' };
+    await fetchJson(`${base}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        actions: [{ type: 'pointer', id: 'finger1', parameters: { pointerType: 'touch' }, actions: [
+          { type: 'pointerMove', duration: 0, x: Math.round(from[0]), y: Math.round(from[1]) },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerMove', duration: 500, x: Math.round(to[0]), y: Math.round(to[1]) },
+          { type: 'pointerUp', button: 0 },
+        ] }],
+      }),
+    });
+    return { result: `Dragged from [${from[0]}, ${from[1]}] to [${to[0]}, ${to[1]}]` };
+  }
+
+  if (action === 'pinch') {
+    const bounds = target?.bounds;
+    const [x, y] = bounds?.length === 2 ? bounds : bounds ? [bounds[0] + bounds[2] / 2, bounds[1] + bounds[3] / 2] : [undefined, undefined];
+    const zoomIn = value === 'in';
+    const script = platform === 'ios' ? 'mobile: pinch' : zoomIn ? 'mobile: pinchOpenGesture' : 'mobile: pinchCloseGesture';
+    const args = platform === 'ios' ? [{ scale: zoomIn ? 2 : 0.5, velocity: 1 }] : [{ ...(x !== undefined && y !== undefined ? { x: Math.round(x), y: Math.round(y) } : {}), percent: 0.5, steps: 20 }];
+    await fetchJson(`${base}/execute/sync`, { method: 'POST', body: JSON.stringify({ script, args }) });
+    return { result: `Pinched ${zoomIn ? 'in' : 'out'}` };
   }
 
   if (action === 'type' || action === 'fill') {

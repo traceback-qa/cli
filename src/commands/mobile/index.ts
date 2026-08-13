@@ -1,16 +1,76 @@
+/**
+ * `traceback mobile verify` — one-flag mobile verification through the relay tunnel.
+ *
+ * One command, one shot: create a relay session, attach this machine as the agent,
+ * register the local Appium server as the session's device, and let the CLOUD engine
+ * drive the device through the tunnel while it verifies a natural-language goal.
+ *
+ * The flow (all inside this command):
+ *
+ *   1. `POST /mobile-sessions` — a session for this workspace (or reuse the active one
+ *      with `--reuse`).
+ *   2. Attach as the relay agent (`RelayAgentClient`) so the backend can reach back
+ *      into this machine — this is the tunnel half.
+ *   3. `PATCH /mobile-sessions/{id}/device` — tell the backend the session's device is
+ *      the local Appium server (`appium_url`, default http://localhost:4723). This is
+ *      what lets `verify-mobile` adopt the *live* device instead of provisioning one.
+ *   4. `POST .../mcp/verify-mobile` with `session_id` — the cloud engine drives the
+ *      screen through the tunnel (tap/type/swipe/verify) until the goal is achieved
+ *      or fails, then returns the verdict.
+ *   5. Render the verdict; tear the session down (or keep the tunnel live with `--keep`
+ *      for the edit -> hot-reload -> verify loop).
+ *
+ * `mobile dev` / `mobile test` (the persistent cloud-emulator mode) are registered as
+ * siblings in `dev.ts` and unchanged.
+ */
+
 import type { Command } from 'commander';
 import type { CliContext } from '../../types/context.js';
 import { createRequireAuthMiddleware } from '../../middleware/require-auth.js';
-import { spawn } from 'child_process';
-import path from 'path';
-import os from 'os';
-import { existsSync } from 'fs';
+import { RelayAgentClient, type RelayReadyInfo } from '../../infrastructure/tunnel/relay/index.js';
+import { resolveVerifyDevice } from '../../infrastructure/mobile/device.picker.js';
+import { startScrcpyAgent, type ScrcpyAgent } from '../../infrastructure/mobile/scrcpy-agent.js';
 import { registerMobileDevCommands } from './dev.js';
 
 type ContextGetter = (cmd: Command) => CliContext | undefined;
 
-const MAX_STEPS = 15;
 const DEFAULT_APPIUM_URL = 'http://localhost:4723';
+const DEFAULT_APPIUM_PORT = 4723;
+const DEFAULT_LOCAL_URL = 'http://localhost:8081';
+// verify-mobile runs the full agent loop (up to 15 LLM steps, each up to ~1 min).
+// The API client's default 30s timeout would kill a legit in-flight verify.
+const VERIFY_TIMEOUT_MS = 30 * 60 * 1000;
+
+interface VerifyStep {
+  status: string;
+  description: string;
+  failure_reason?: string | null;
+}
+
+interface VerifyVerdict {
+  status: string;
+  passed: boolean;
+  run_id?: string | null;
+  steps_passed: number;
+  steps_total: number;
+  duration_ms: number;
+  steps?: VerifyStep[];
+  summary?: string | null;
+  video_url?: string | null;
+  message?: string | null;
+}
+
+interface VerifyOptions {
+  goal: string;
+  platform?: string;
+  appiumUrl?: string;
+  udid?: string;
+  localUrl?: string;
+  port?: string;
+  keep?: boolean;
+  reuse?: boolean;
+  workspace?: string;
+}
 
 export function registerMobileCommands(program: Command, getContext: ContextGetter): void {
   const mobile = program
@@ -25,331 +85,407 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
   mobile
     .command('verify')
     .description(
-      'Verify a mobile app against a natural-language goal.\n' +
-        'The backend runs the AI agent in the cloud. The CLI sends screen XML\n' +
-        'and executes returned gestures locally via Appium.',
+      'One-shot verification: open a relay tunnel to your local device and let the cloud\n' +
+        'engine drive it against a natural-language goal. Requires a local Appium server\n' +
+        'running (default http://localhost:4723) with your app/simulator attached.',
     )
     .requiredOption('-g, --goal <text>', 'Natural-language verification goal')
-    .requiredOption('-p, --platform <platform>', 'Platform: android or ios')
-    .option('--apk <path>', 'Path to APK (Android)')
-    .option('--app <path>', 'Path to .app bundle (iOS)')
-    .option('--device <name>', 'Device/emulator name')
-    .option('--os-version <version>', 'OS version to target')
-    .option('--package <pkg>', 'Android app package (e.g. com.example.app)')
-    .option('--activity <activity>', 'Android launch activity')
-    .option('--deep-link <uri>', 'Deep link to navigate to on start')
-    .option('--appium-url <url>', 'Appium server URL', DEFAULT_APPIUM_URL)
-    .option('--workspace <id>', 'Workspace ID (defaults to current)')
-    .action(async function (this: Command, options) {
+    .option('-p, --platform <platform>', 'Platform: android or ios', 'android')
+    .option(
+      '--appium-url <url>',
+      'Your local Appium server URL',
+      DEFAULT_APPIUM_URL,
+    )
+    .option(
+      '--udid <udid>',
+      'Device UDID to run the test against (auto-detected, or prompted when ambiguous)',
+    )
+    .option(
+      '--local-url <url>',
+      'Local dev server URL the tunnel forwards HTTP to (default http://localhost:8081)',
+    )
+    .option('--port <port>', 'Shorthand for --local-url http://localhost:<port>')
+    .option(
+      '--keep',
+      'Keep the tunnel + session alive after the verdict (for the edit→reload→verify loop)',
+    )
+    .option(
+      '--reuse',
+      "Reuse the workspace's active session instead of creating a new one",
+    )
+    .option('-w, --workspace <id>', 'Workspace ID (defaults to current)')
+    .action(async function (this: Command, options: VerifyOptions) {
       const ctx = getContext(this);
       if (!ctx) return;
 
       const requireAuth = createRequireAuthMiddleware(ctx);
       await requireAuth();
 
-      const api = ctx.infra.api;
-      const ui = ctx.infra.ui;
-      const logger = ctx.infra.logger;
+      const { api, ui } = ctx.infra;
 
-      // ── Resolve workspace ──────────────────────────────
-      let workspaceId = options['workspace'];
+      const workspaceId = await resolveWorkspaceId(ctx, options.workspace);
       if (!workspaceId) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- activeWorkspaceId isn't part of CliContext's declared shape
-        const ctxWithSession = ctx as any;
-        workspaceId = ctxWithSession.activeWorkspaceId;
-        if (!workspaceId) {
-          ui.error(
-            'No workspace selected. Use --workspace <id> or:\n  traceback workspaces select',
-          );
-          return;
-        }
-      }
-
-      // ── Start the mobile relay ─────────────────────────
-      const relayPath = findRelayPath();
-      if (!relayPath) {
-        ui.error(
-          'Could not find the Python mobile relay script.\n' +
-            'Clone the backend repo next to the CLI repo, or set TRACEBACK_BACKEND_PATH.\n' +
-            'Expected: backend/scripts/mobile_relay.py',
-        );
+        ui.error('No workspace selected. Use --workspace <id> or:\n  traceback workspaces select');
         return;
       }
 
-      logger?.debug(`Starting mobile relay: ${relayPath}`);
+      const platform = options.platform ?? 'android';
+      if (platform !== 'android' && platform !== 'ios') {
+        ui.error(`Unsupported platform: ${platform} — use android or ios`);
+        return;
+      }
 
-      const relay = spawn('python3', [relayPath], {
-        stdio: ['pipe', 'pipe', 'inherit'],
+      const appiumUrl = options.appiumUrl ?? DEFAULT_APPIUM_URL;
+      const localUrl =
+        options.localUrl ?? (options.port ? `http://localhost:${options.port}` : DEFAULT_LOCAL_URL);
+
+      // iOS has no cloud provisioning — the engine always drives a booted Simulator on
+      // this machine, and Appium's XCUITest driver MUST be told which one, so the target
+      // device is always resolved up front — never left to Appium's guessing.
+      // Resolve which device this run targets. An explicit --udid wins; otherwise a
+      // single detected device is auto-selected, several prompt the user to pick one,
+      // and zero fails fast with guidance. Previously only iOS had any of this —
+      // Android let Appium silently pick "the sole attached device" or fail opaquely
+      // when several were connected.
+      const device = await resolveVerifyDevice({
+        platform,
+        explicitId: options.udid,
+        flagName: '--udid',
+        interactive: !ui.isJsonMode() && !ui.isSilent(),
+        ui,
       });
+      if (!device) return;
+      const udid = device.id;
 
-      relay.on('error', (err: Error) => {
-        ui.error(`Relay process error: ${err.message}`);
-      });
+      // ── 1. Create (or reuse) the relay session ─────────────────────────
+      let sessionId: string;
+      let sessionUrl: string | null = null;
+      let proxyPath: string | null = null;
+      let deviceToken: string | null = null;
 
-      // Line-buffered reader for the relay's stdout
-      let buffer = '';
-      let relayExited = false;
-
-      relay.on('close', () => {
-        relayExited = true;
-      });
-      relay.on('error', () => {
-        relayExited = true;
-      });
-
-      const readLine = (): Promise<string> => {
-        return new Promise((resolve, reject) => {
-          // Check if we already have a complete line in the buffer
-          const newlineIdx = buffer.indexOf('\n');
-          if (newlineIdx !== -1) {
-            const line = buffer.slice(0, newlineIdx);
-            buffer = buffer.slice(newlineIdx + 1);
-            resolve(line);
+      const sessionSpinner = ui.spinner(
+        options.reuse ? 'Looking for an active session...' : 'Creating relay session...',
+      );
+      try {
+        if (options.reuse) {
+          const status = await api.get<{
+            active: boolean;
+            session_id?: string | null;
+            session_url?: string | null;
+          }>(`/api/v1/workspaces/${workspaceId}/mobile-sessions`);
+          if (!status.data.active || !status.data.session_id) {
+            sessionSpinner.fail(
+              'No active session — start one with `traceback tunnel up` (or drop --reuse)',
+            );
             return;
           }
-
-          // If the relay already exited and we have nothing buffered, reject.
-          if (relayExited) {
-            reject(new Error('Relay process exited unexpectedly'));
-            return;
-          }
-
-          const onData = (chunk: Buffer) => {
-            buffer += chunk.toString();
-            const idx = buffer.indexOf('\n');
-            if (idx !== -1) {
-              const line = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 1);
-              cleanup();
-              resolve(line);
-            }
-          };
-
-          const onClose = () => {
-            cleanup();
-            reject(new Error('Relay process exited while waiting for response'));
-          };
-
-          const cleanup = () => {
-            relay.stdout!.removeListener('data', onData);
-            relay.stdout!.removeListener('close', onClose);
-          };
-
-          relay.stdout!.on('data', onData);
-          relay.stdout!.on('close', onClose);
-        });
-      };
-
-      const sendRelay = (msg: Record<string, unknown>) => {
-        relay.stdin!.write(JSON.stringify(msg) + '\n');
-      };
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- relay protocol payload shape not modeled client-side
-      const readRelay = async (): Promise<any> => {
-        const line = await readLine();
-        try {
-          return JSON.parse(line);
-        } catch {
-          return { ok: false, detail: `Invalid relay output: ${line.slice(0, 200)}` };
-        }
-      };
-
-      // ── Step 1: Create run via API ─────────────────────
-      const startSpinner = ui.spinner('Creating mobile verification run...');
-      let runId: string;
-      let goal: string;
-
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mobile-start response shape not modeled client-side
-        const res = await api.post<any>(`/api/v1/workspaces/${workspaceId}/mcp/mobile-start`, {
-          goal: options['goal'],
-          platform: options['platform'],
-        });
-        runId = res.data.run_id;
-        goal = res.data.goal;
-        startSpinner.succeed(`Run ${runId} started`);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
-      } catch (err: any) {
-        startSpinner.fail(`Failed to create run: ${err.message}`);
-        relay.kill();
-        return;
-      }
-
-      // ── Step 2: Start Appium session via relay ─────────
-      const deviceSpinner = ui.spinner('Connecting to device...');
-      sendRelay({
-        cmd: 'start',
-        appium_url: options['appiumUrl'] || DEFAULT_APPIUM_URL,
-        platform: options['platform'],
-        app_path: options['apk'] || options['app'] || null,
-        device_name: options['device'] || null,
-        platform_version: options['osVersion'] || null,
-        app_package: options['package'] || null,
-        app_activity: options['activity'] || null,
-        start_deep_link: options['deepLink'] || null,
-      });
-
-      const startResult = await readRelay();
-      if (!startResult.ok) {
-        deviceSpinner.fail(`Failed to connect: ${startResult.detail}`);
-        relay.kill();
-        return;
-      }
-      deviceSpinner.succeed('Device connected');
-
-      // ── Step 3: Main loop ──────────────────────────────
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- step result shape not modeled client-side
-      const stepResults: any[] = [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- step history shape not modeled client-side
-      const history: any[] = [];
-      let stepIndex = 0;
-      let passed = false;
-      let errorMessage: string | null = null;
-
-      ui.info(`\nRunning: "${goal.slice(0, 80)}${goal.length > 80 ? '...' : ''}"\n`);
-
-      try {
-        for (stepIndex = 0; stepIndex < MAX_STEPS; stepIndex++) {
-          // a. Extract screen state
-          const stepSpinner = ui.spinner(`Step ${stepIndex + 1}/${MAX_STEPS} — reading screen...`);
-          sendRelay({ cmd: 'page_source' });
-          const pageResult = await readRelay();
-
-          if (!pageResult.ok) {
-            stepSpinner.fail(`Failed to read screen: ${pageResult.detail}`);
-            errorMessage = pageResult.detail;
-            break;
-          }
-
-          // b. Send to backend for decision
-          stepSpinner.setText(`Step ${stepIndex + 1}/${MAX_STEPS} — thinking...`);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mobile-step response shape not modeled client-side
-          const stepRes = await api.post<any>(`/api/v1/workspaces/${workspaceId}/mcp/mobile-step`, {
-            run_id: runId,
-            xml: pageResult.xml,
-            step_index: stepIndex,
-            history,
+          sessionId = status.data.session_id;
+          sessionUrl = status.data.session_url ?? null;
+        } else {
+          const res = await api.post<{
+            session_id: string;
+            session_url: string;
+            proxy_path: string;
+            device_token: string;
+          }>(`/api/v1/workspaces/${workspaceId}/mobile-sessions`, {
+            mobile_app_id: null,
+            framework: 'native',
           });
-
-          const decision = stepRes.data.decision;
-          const done = stepRes.data.done;
-
-          if (done) {
-            stepSpinner.succeed(
-              `Step ${stepIndex + 1}: done — ${decision.reasoning || 'goal complete'}`,
-            );
-            passed = true;
-            break;
-          }
-
-          // c. Execute decision on device
-          stepSpinner.setText(
-            `Step ${stepIndex + 1}/${MAX_STEPS} — ${decision.tool} ${decision.ref || ''}`,
-          );
-          sendRelay({ cmd: 'execute', decision });
-          const execResult = await readRelay();
-
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- step entry combines decision + relay result, no shared shape modeled
-          const stepEntry: any = {
-            step_index: stepIndex,
-            decision,
-            result: {
-              outcome: execResult.ok ? 'success' : 'failure',
-              detail: execResult.detail || '',
-              duration_ms: execResult.duration_ms || 0,
-            },
-          };
-
-          stepResults.push(stepEntry);
-          history.push(stepEntry);
-
-          if (execResult.ok) {
-            stepSpinner.succeed(
-              `Step ${stepIndex + 1}: ${decision.tool} ${decision.ref || decision.text || ''}`,
-            );
-          } else {
-            stepSpinner.warn(
-              `Step ${stepIndex + 1}: ${decision.tool} failed — ${execResult.detail?.slice(0, 80)}`,
-            );
-          }
+          sessionId = res.data.session_id;
+          sessionUrl = res.data.session_url;
+          proxyPath = res.data.proxy_path;
+          deviceToken = res.data.device_token;
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios/relay error shape not modeled client-side
+        sessionSpinner.succeed(options.reuse ? `Reusing session ${sessionId}` : `Session ${sessionId} created`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios/network error shape not modeled
       } catch (err: any) {
-        errorMessage = `${err.message}`;
+        sessionSpinner.fail(`Failed: ${errorMessage(err)}`);
+        return;
       }
 
-      if (!passed && !errorMessage && stepIndex >= MAX_STEPS) {
-        errorMessage = `Exceeded max steps (${MAX_STEPS}) without completing the goal`;
+      // ── 2. Attach this machine as the agent ────────────────────────────
+      const authToken = await getAuthToken(ctx);
+      if (!authToken) {
+        ui.error('No auth token found — run `traceback login` first.');
+        await teardownSession(api, ui, workspaceId, sessionId);
+        return;
       }
 
-      // ── Step 4: Report final result ────────────────────
-      const reportSpinner = ui.spinner('Reporting results...');
-      const status = passed ? 'PASSED' : 'FAILED';
-      const title = passed
-        ? 'Verification passed'
-        : errorMessage?.slice(0, 100) || 'Verification failed';
+      const config = await ctx.infra.config.loadGlobalConfig();
+      const attachSpinner = ui.spinner('Attaching your device to the cloud engine...');
 
+      // Allow the Appium port (and any custom --appium-url port) through the reverse-port proxy.
+      const appiumPort = portOf(appiumUrl) ?? DEFAULT_APPIUM_PORT;
+      const allowedTargetPorts = new Set([DEFAULT_APPIUM_PORT, appiumPort]);
+
+      let client: RelayAgentClient | null = null;
+      let verifyStarted = false;
+      let scrcpyAgent: ScrcpyAgent | null = null;
+
+      const stopTunnel = async (): Promise<void> => {
+        try {
+          scrcpyAgent?.stop();
+        } catch {
+          /* already stopped */
+        }
+        try {
+          await client?.stop();
+        } catch {
+          /* already closed */
+        }
+      };
+      const teardown = async (): Promise<void> => {
+        await stopTunnel();
+        try {
+          await api.delete(`/api/v1/workspaces/${workspaceId}/mobile-sessions/${sessionId}`);
+        } catch {
+          /* the session will idle-timeout on its own */
+        }
+      };
+
+      // A Ctrl+C while the engine is driving the device must not strand the session:
+      // tear the tunnel down and exit (the --keep path installs its own handler later).
+      let interrupted = false;
+      const onInterrupt = (): void => {
+        if (interrupted) return;
+        interrupted = true;
+        ui.warn('\nInterrupted — releasing the session...');
+        void teardown().finally(() => process.exit(130));
+      };
+      process.once('SIGINT', onInterrupt);
+
+      // The verdict is produced from inside the client's onReady (fires on hello_ack),
+      // so the tunnel is guaranteed up before the engine starts driving the device.
+      let resolveVerdict: (v: VerifyVerdict) => void = () => {};
+      let rejectVerdict: (err: unknown) => void = () => {};
+      const verdictPromise = new Promise<VerifyVerdict>((resolve, reject) => {
+        resolveVerdict = resolve;
+        rejectVerdict = reject;
+      });
+
+      client = new RelayAgentClient({
+        apiUrl: config.apiUrl,
+        authToken,
+        sessionId,
+        localUrl,
+        allowedTargetPorts,
+        logger: {
+          debug: (message) => ui.debug(message),
+          warn: (message) => ui.debug(message),
+        },
+        onReady: (info: RelayReadyInfo) => {
+          void (async () => {
+            if (verifyStarted) return;
+            verifyStarted = true;
+            try {
+              attachSpinner.succeed(`Device attached — session ${info.code ?? info.sessionId}`);
+
+              // ── 3. Register the local Appium server as this session's device ──
+              const reportSpinner = ui.spinner('Registering local device...');
+              try {
+                await api.patch(
+                  `/api/v1/workspaces/${workspaceId}/mobile-sessions/${sessionId}/device`,
+                  { appium_url: appiumUrl, udid: udid ?? null, device_name: device.name },
+                );
+                reportSpinner.succeed(`Appium reachable at ${appiumUrl}`);
+              } catch (err) {
+                reportSpinner.fail(`Failed to register device: ${errorMessage(err)}`);
+                throw err;
+              }
+
+              // Live device mirroring (scrcpy) — Android only. The device was resolved up
+              // front, so scrcpy always has a concrete serial to target (`adb -s <udid>`).
+              // Best-effort: mirroring is a nicety, never required — the agent is
+              // self-healing and must never fail the verify itself.
+              if (platform === 'android') {
+                scrcpyAgent = startScrcpyAgent({
+                  apiUrl: config.apiUrl,
+                  token: authToken,
+                  sessionId,
+                  udid,
+                  onLog: (line) => ui.debug(`[scrcpy] ${line}`),
+                });
+              }
+
+              // ── 4. Cloud engine drives the device through the tunnel ──
+              const verifySpinner = ui.spinner(
+                'Cloud engine is driving your device — this can take a few minutes...',
+              );
+              try {
+                const res = await api.post<VerifyVerdict>(
+                  `/api/v1/workspaces/${workspaceId}/mcp/verify-mobile`,
+                  { goal: options.goal, platform, session_id: sessionId, trigger_type: 'CLI' },
+                  // Never auto-retry this call: a retry would re-POST and start a
+                  // SECOND run against the same device while the first is still going.
+                  { timeout: VERIFY_TIMEOUT_MS, retryAttempts: 0 },
+                );
+                verifySpinner.succeed('Verification complete');
+                resolveVerdict(res.data);
+              } catch (err) {
+                verifySpinner.fail('Verification failed');
+                throw err;
+              }
+            } catch (err) {
+              rejectVerdict(err);
+            }
+          })();
+        },
+        onClosed: (reason) => {
+          ui.warn(`Tunnel closed: ${reason}`);
+        },
+      });
+
+      let verdict: VerifyVerdict;
       try {
-        await api.patch(`/api/v1/workspaces/${workspaceId}/mcp/mobile-result/${runId}`, {
-          status,
-          steps_completed: stepResults.length,
-          step_results: stepResults,
-          error_message: errorMessage,
-          summary_title: title,
-          summary: errorMessage || `Completed ${stepResults.length} steps successfully`,
-        });
-        reportSpinner.succeed('Results reported');
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
-      } catch (err: any) {
-        reportSpinner.fail(`Failed to report: ${err.message}`);
+        await client.connect();
+        verdict = await verdictPromise;
+      } catch (err) {
+        if (ui.isJsonMode()) {
+          // Machine-readable failure: still emit a JSON object on stdout (so the MCP
+          // server / parent process gets a real error, not empty output) and exit 1.
+          ui.renderJson({ status: 'error', passed: false, message: errorMessage(err) });
+          process.exitCode = 1;
+        } else {
+          ui.error(errorMessage(err));
+        }
+        // --keep only applies after a successful verdict — an error path always
+        // releases the session, or the failed tunnel/run would leak until idle-timeout.
+        await teardown();
+        return;
       }
 
-      // ── Cleanup ────────────────────────────────────────
-      sendRelay({ cmd: 'quit' });
-      try {
-        await readRelay();
-      } catch {} // wait for quit ack
-      relay.kill();
+      // The dangerous phase is over; let the --keep path own SIGINT from here.
+      process.removeListener('SIGINT', onInterrupt);
 
-      // ── Print summary ──────────────────────────────────
-      ui.info('');
-      if (passed) {
-        ui.info(`✅ PASSED — ${stepResults.length} step(s)`);
+      // ── 5. Render the verdict ──────────────────────────────────────────
+      if (ui.isJsonMode()) {
+        // Machine-readable mode: print ONLY the verdict JSON to stdout (spinners and
+        // human output go to stderr / are suppressed), so `traceback mobile verify --json`
+        // can be driven by the MCP server / other tooling and parsed directly.
+        ui.renderJson(verdict);
       } else {
-        ui.info(`❌ FAILED — ${stepResults.length} step(s) completed`);
-        if (errorMessage) ui.error(`Error: ${errorMessage}`);
+        renderVerdict(ui, verdict);
       }
+
+      // --keep is interactive-only: in json mode the verdict JSON is the whole point,
+      // and waiting for Ctrl+C would hang a parent process (MCP server).
+      if (options.keep && verdict.passed && !ui.isJsonMode()) {
+        // Keep the tunnel live for the edit -> hot-reload -> verify loop.
+        ui.info('');
+        ui.box(
+          [
+            `Session:   ${sessionId}`,
+            `Local Appium: ${appiumUrl}`,
+            `Public:    ${sessionUrl ?? 'n/a'}`,
+            `Proxy:     ${proxyPath ?? 'n/a'}`,
+            `Device token: ${deviceToken ?? 'n/a'}`,
+          ].join('\n'),
+          { title: 'Tunnel kept alive' },
+        );
+        ui.info('Save a file in your app — changes flow to the device in ~2s.');
+        ui.info('Re-verify with:');
+        ui.info(`  traceback mobile verify -g "<goal>" -p ${platform} --reuse --keep`);
+        ui.info('\nPress Ctrl+C to stop.\n');
+        await waitForInterrupt();
+      }
+
+      const stopSpinner = ui.spinner('Releasing the session...');
+      await teardown();
+      stopSpinner.succeed('Session released');
     });
 }
 
-function findRelayPath(): string | null {
-  const envPath = process.env.TRACEBACK_BACKEND_PATH;
-  if (envPath) {
-    const p = path.join(envPath, 'scripts', 'mobile_relay.py');
-    if (existsSync(p)) return p;
+// ── Rendering ──────────────────────────────────────────────────────────────
+
+function renderVerdict(
+  ui: CliContext['infra']['ui'],
+  verdict: VerifyVerdict,
+): void {
+  const ok = verdict.passed;
+  const duration = formatDuration(verdict.duration_ms);
+  ui.info('');
+  if (ok) {
+    ui.info(`✅ PASSED — ${verdict.steps_passed}/${verdict.steps_total} steps in ${duration}`);
+  } else {
+    ui.info(`❌ FAILED — ${verdict.steps_passed}/${verdict.steps_total} steps in ${duration}`);
   }
+  const steps = verdict.steps ?? [];
+  if (steps.length > 0) {
+    ui.table(
+      ['Step', 'Result', 'Description'],
+      steps.map((s, i) => [
+        String(i + 1),
+        s.status === 'passed' ? '✅' : '❌',
+        s.description ?? '',
+      ]),
+    );
+  }
+  if (verdict.summary) {
+    ui.info(`\nSummary: ${verdict.summary}`);
+  }
+  if (verdict.message) {
+    ui.warn(`\n${verdict.message}`);
+  }
+  if (verdict.video_url) {
+    ui.info(`Video: ${verdict.video_url}`);
+  }
+}
 
-  const sibling = path.join(
-    path.dirname(new URL(import.meta.url).pathname),
-    '..',
-    '..',
-    '..',
-    '..',
-    'backend',
-    'scripts',
-    'mobile_relay.py',
-  );
-  if (existsSync(sibling)) return sibling;
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-  const home = path.join(
-    os.homedir(),
-    'Documents',
-    'GitHub',
-    'backend',
-    'scripts',
-    'mobile_relay.py',
-  );
-  if (existsSync(home)) return home;
+/** Resolve the workspace id the same way `traceback workspaces` persists it. */
+async function resolveWorkspaceId(
+  ctx: CliContext,
+  explicit: string | undefined,
+): Promise<string | null> {
+  if (explicit) return explicit;
+  const config = await ctx.infra.config.loadGlobalConfig();
+  return config.workspaceId ?? null;
+}
 
-  return null;
+async function getAuthToken(ctx: CliContext): Promise<string | null> {
+  const token = await ctx.infra.authStore.get();
+  return token?.accessToken ?? null;
+}
+
+async function teardownSession(
+  api: CliContext['infra']['api'],
+  ui: CliContext['infra']['ui'],
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  try {
+    await api.delete(`/api/v1/workspaces/${workspaceId}/mobile-sessions/${sessionId}`);
+  } catch {
+    ui.warn('Could not confirm teardown — the session will idle-timeout on its own.');
+  }
+}
+
+function portOf(url: string): number | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.port ? Number(parsed.port) : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  return `${Math.floor(totalSeconds / 60)}m ${totalSeconds % 60}s`;
+}
+
+function waitForInterrupt(): Promise<void> {
+  return new Promise((resolve) => {
+    const handler = (): void => {
+      process.removeListener('SIGINT', handler);
+      resolve();
+    };
+    process.on('SIGINT', handler);
+  });
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

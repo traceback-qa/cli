@@ -8,7 +8,8 @@
  * Returns a unified list of devices the user can pick from.
  */
 
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'node:child_process';
+import { resolveSimctlPathSync } from './simctl.js';
 
 export interface MobileDevice {
   /** Unique device identifier (serial for Android, UDID for iOS). */
@@ -71,7 +72,12 @@ function detectAndroidDevices(): MobileDevice[] {
 }
 
 /**
- * Detect running iOS simulators via `xcrun simctl list devices booted`.
+ * Detect running iOS simulators via `simctl list devices booted`.
+ *
+ * Uses the ABSOLUTE simctl path (resolved from a real Xcode install) instead of
+ * `xcrun simctl`, because `xcrun` only works when `xcode-select` points at a real
+ * Xcode — machines with the active developer dir set to Command Line Tools (which
+ * has no simctl) would otherwise silently report zero simulators.
  *
  * Output format:
  *   == Devices ==
@@ -82,8 +88,11 @@ function detectIOSSimulators(): MobileDevice[] {
   // Only available on macOS
   if (process.platform !== 'darwin') return [];
 
+  const simctl = resolveSimctlPathSync();
+  if (!simctl) return [];
+
   try {
-    const output = execSync('xcrun simctl list devices booted', {
+    const output = execFileSync(simctl, ['list', 'devices', 'booted'], {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'ignore'],

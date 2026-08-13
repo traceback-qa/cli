@@ -158,6 +158,75 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
   );
 
   server.tool(
+    'verify_mobile',
+    'Verify a UI change on a mobile device against a natural-language goal. The backend runs its mobile agent against an emulator via Appium and returns a pass/fail verdict. Proactively call this after making any mobile UI change.',
+    {
+      goal: z
+        .string()
+        .min(1)
+        .describe(
+          'The goal to verify on the device, e.g. "the login button is visible and tappable"',
+        ),
+      platform: z
+        .enum(['android', 'ios'])
+        .default('android')
+        .describe("Device platform (only 'android' is supported today)"),
+      session_id: z
+        .string()
+        .optional()
+        .describe(
+          'Reuse the live emulator of this relay session (from mobile dev) instead of provisioning a fresh one — verifies the exact screen that was just hot-reloaded. Omit to verify against a freshly provisioned emulator.',
+        ),
+    },
+    async ({ goal, platform, session_id }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- verify-mobile response shape not modeled client-side
+        const res = await api.post<any>(
+          `/api/v1/workspaces/${activeWorkspaceId}/mcp/verify-mobile`,
+          { goal, platform, ...(session_id ? { session_id } : {}) },
+          { timeout: 300_000 }, // 5 minutes — the agent may take a while
+        );
+
+        const data = res.data;
+        const lines: string[] = [];
+
+        if (data.status === 'complete') {
+          lines.push(data.passed ? '✅ PASSED' : '❌ FAILED');
+          lines.push(`Steps: ${data.steps_passed}/${data.steps_total} passed`);
+          lines.push(`Duration: ${data.duration_ms}ms`);
+          if (data.message) lines.push(`Reason: ${data.message}`);
+          if (data.summary) lines.push(`Summary: ${data.summary}`);
+          if (data.video_url) lines.push(`Video: ${data.video_url}`);
+          if (data.steps) {
+            lines.push('');
+            for (const s of data.steps) {
+              const icon = s.status === 'passed' ? '✓' : '✗';
+              lines.push(`  ${icon} ${s.description}`);
+              if (s.failure_reason) lines.push(`    → ${s.failure_reason}`);
+            }
+          }
+        } else if (data.status === 'error') {
+          lines.push(`Error: ${data.message}`);
+        } else {
+          lines.push(JSON.stringify(data, null, 2));
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
+      }
+    },
+  );
+
+  server.tool(
     'create_test',
     'Create a new, permanent test definition in the Traceback workspace.',
     {

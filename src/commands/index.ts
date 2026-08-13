@@ -10,3 +10,5 @@ export { registerCompletionCommands } from './completion/index.js';
 export { registerMcpCommands } from './mcp/index.js';
 export { registerMobileCommands } from './mobile/index.js';
 export { registerSetupCommands } from './setup/index.js';
+export { registerInstallCommands } from './install/index.js';
+export { registerTunnelCommands } from './tunnel/index.js';

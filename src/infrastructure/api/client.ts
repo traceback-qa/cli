@@ -58,7 +58,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     data?: unknown,
     config?: Record<string, unknown>,
   ): Promise<ApiResponse<T>> {
-    const maxRetries = opts.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS;
+    // Per-request retry override: long-running calls (e.g. verify-mobile, which can
+    // take minutes) must NOT be auto-retried on a late 5xx — a retry would re-POST
+    // and start a second run against the same device. 0 disables retries.
+    const { retryAttempts, ...axiosConfig } = config ?? {};
+    const maxRetries =
+      typeof retryAttempts === 'number'
+        ? retryAttempts
+        : (opts.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS);
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -66,7 +73,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
           method,
           url,
           data,
-          ...config,
+          ...axiosConfig,
         });
         return {
           data: response.data,
