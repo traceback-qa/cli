@@ -32,6 +32,21 @@ interface RunIssueEvent {
   title: string;
 }
 
+interface RunStepStartedEvent {
+  step_number: number;
+  action?: string;
+  title?: string | null;
+  description?: string | null;
+  reasoning?: string | null;
+}
+
+interface RunStepResultEvent {
+  step_number: number;
+  outcome?: string;
+  detail?: string | null;
+  error?: string | null;
+}
+
 interface RunStatusEvent {
   new_status: string;
 }
@@ -102,6 +117,24 @@ export async function watchRun(
       ui.info(`Status → ${data.new_status}`);
     });
 
+    socket.on('run.step_started', (data: RunStepStartedEvent) => {
+      const action = data.title || data.action || 'next action';
+      ui.info(`🤖 Agent — step ${data.step_number + 1}: ${action}`);
+      if (data.reasoning) ui.hint(`Reasoning: ${data.reasoning}`);
+      if (data.description && data.description !== data.reasoning) {
+        ui.hint(`Details: ${data.description}`);
+      }
+    });
+
+    socket.on('run.step_result', (data: RunStepResultEvent) => {
+      const detail = data.detail || data.error || data.outcome || 'completed';
+      if (data.outcome === 'failure' || data.error) {
+        ui.warn(`Step ${data.step_number + 1}: ${detail}`);
+      } else {
+        ui.info(`Step ${data.step_number + 1}: ${detail}`);
+      }
+    });
+
     socket.on('run.step_completed', (data: RunStepEvent) => {
       const label = data.title || data.description || data.action || 'step';
       const target = data.ref ? ` → ${data.ref}` : '';
@@ -121,10 +154,11 @@ export async function watchRun(
     });
 
     socket.on('run.completed', (data: RunCompletedEvent) => {
-      if (data.final_status === 'PASSED') {
-        ui.success(`Run completed: ${data.final_status}`);
+      const status = data.final_status.toUpperCase();
+      if (status === 'PASSED') {
+        ui.success(`Run completed: ${status}`);
       } else {
-        ui.warn(`Run completed: ${data.final_status}`);
+        ui.warn(`Run completed: ${status}`);
       }
       finish();
     });

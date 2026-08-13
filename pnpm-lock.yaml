@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  traceback: 'link:'
+  '@tracebackai/cli': 'link:'
 
 importers:
 
@@ -17,6 +17,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(supports-color@7.2.0)(zod@3.25.76)
+      '@tracebackai/cli':
+        specifier: 'link:'
+        version: 'link:'
       axios:
         specifier: ^1.7.2
         version: 1.18.1(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)

@@ -10,6 +10,7 @@
 import type { Command } from 'commander';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { CliContext } from '../../types/context.js';
+import type { MobileDevice } from '../../infrastructure/mobile/device.detector.js';
 
 type ContextGetter = typeof GetContextFn;
 
@@ -53,6 +54,29 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
           { name: '📱  Mobile tests', value: 'mobile' },
         ],
       });
+
+      // Step 1.5 (mobile only): pre-made test, or a live verify against a device
+      if (platform === 'mobile') {
+        const mode = await select({
+          message: 'How do you want to run the mobile test?',
+          choices: [
+            {
+              name: '📋  Pre-made test',
+              value: 'premade',
+              description: 'Pick a saved test from your workspace',
+            },
+            {
+              name: '🎯  Live verify',
+              value: 'live',
+              description: 'Describe what to verify, pick a device, and run it now',
+            },
+          ],
+        });
+        if (mode === 'live') {
+          await handleMobileLiveVerify(ctx, workspaceId);
+          return;
+        }
+      }
 
       // Step 2: Fetch tests from the backend
       const spinner = ctx.infra.ui.spinner('Fetching tests...');
@@ -386,6 +410,7 @@ async function handleMobileTest(
         environment: 'production',
         viewport: 'phone',
         session_id: bridge.sessionId,
+        device_name: device.name,
       },
     );
     runSpinner.succeed(`Run started: ${result.data.run_id}`);
@@ -408,4 +433,59 @@ async function handleMobileTest(
     await bridge.close();
     ctx.infra.ui.info('Appium session closed.');
   }
+}
+
+/**
+ * Live verify flow — the mobile path of `traceback tests` for a fresh,
+ * natural-language goal rather than a saved test.
+ *
+ * Flow:
+ *   1. Ask for the goal
+ *   2. Detect running emulators/simulators and let the user pick one
+ *      (the chosen device implies the platform)
+ *   3. Run the same verify loop as `traceback mobile verify`
+ */
+async function handleMobileLiveVerify(ctx: CliContext, workspaceId: string): Promise<void> {
+  const { input, select } = await import('@inquirer/prompts');
+  const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+  const { runMobileVerify } = await import('../mobile/verify.js');
+
+  const goal = await input({
+    message: 'What should the test verify?',
+    required: true,
+  });
+
+  // Detect running devices — the chosen device implies the platform
+  const deviceSpinner = ctx.infra.ui.spinner('Scanning for devices...');
+  const devices = detectDevices();
+  deviceSpinner.stop();
+
+  if (!devices.length) {
+    ctx.infra.ui.warn('No running emulators or simulators found.');
+    ctx.infra.ui.hint('Start an Android emulator or iOS simulator and try again.');
+    ctx.infra.ui.hint('  Android: `emulator -avd <name>` or open Android Studio');
+    ctx.infra.ui.hint('  iOS:     `open -a Simulator` or open Xcode');
+    return;
+  }
+
+  let device: MobileDevice;
+  if (devices.length === 1) {
+    device = devices[0]!;
+    ctx.infra.ui.info(`Running against: ${device.name} (${device.id})`);
+  } else {
+    device = await select<MobileDevice>({
+      message: 'Select a device',
+      choices: devices.map((d) => ({
+        name: `${d.platform === 'ios' ? '🍎' : '🤖'}  ${d.name}  (${d.id.slice(0, 12)}...)`,
+        value: d,
+      })),
+    });
+  }
+
+  await runMobileVerify(ctx, {
+    workspaceId,
+    goal,
+    platform: device.platform,
+    device,
+  });
 }

@@ -16,6 +16,7 @@ import {
   registerMcpCommands,
   registerMobileCommands,
   registerSetupCommands,
+  registerSkillsCommands,
 } from './commands/index.js';
 import type { CliContext } from './types/context.js';
 
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
   registerMcpCommands(program, getContext);
   registerMobileCommands(program, getContext);
   registerSetupCommands(program, getContext);
+  registerSkillsCommands(program, getContext);
 
   program
     .command('login')

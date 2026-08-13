@@ -79,12 +79,35 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
           'appium:noReset': true,
         };
 
-  const sessionRes = await fetchJson(`${appiumUrl}/session`, {
-    method: 'POST',
-    body: JSON.stringify({
-      capabilities: { alwaysMatch: capabilities },
-    }),
-  });
+  if (opts.platform === 'ios') {
+    // The first session against a given simulator has to compile WebDriverAgent via a real
+    // `xcodebuild build-for-testing` before Appium's XCUITest driver can do anything -- there's
+    // no Android equivalent (UiAutomator2 is a pre-built driver). Without this line, that
+    // multi-minute one-time cost looks indistinguishable from a hang: this exact confusion led
+    // to a real incident (2026-08-12) where a perfectly healthy, still-building WDA process was
+    // repeatedly killed because it "looked stuck" (low CPU%, no output) when it was actually
+    // working -- destroying its build cache and forcing a full cold rebuild each time. Once WDA
+    // is built for a given simulator, Appium detects and reuses the still-running instance, so
+    // every session after the first is fast, same as Android.
+    // eslint-disable-next-line no-console
+    console.log(
+      'ℹ First run on this simulator: iOS has to build WebDriverAgent (Appium\'s driver ' +
+        'companion app) via Xcode before it can start — this can take a few minutes. Later ' +
+        'runs against the same simulator reuse it and start in seconds.',
+    );
+  }
+
+  const sessionRes = await fetchJson(
+    `${appiumUrl}/session`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        capabilities: { alwaysMatch: capabilities },
+      }),
+    },
+    0,
+    APPIUM_SESSION_CREATE_TIMEOUT_MS[opts.platform],
+  );
 
   const appiumSessionId = sessionRes?.value?.sessionId;
   if (!appiumSessionId) {
@@ -108,26 +131,36 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
     timeout: 30_000,
   });
 
+  // Reconnects (Socket.IO auto-reconnect after a network blip) re-fire 'connect' and re-run
+  // this handshake. Tracking the session id here and sending it back as `sessionId` on every
+  // `cli_auth` -- not just the first -- lets the backend rebind the SAME session onto the new
+  // socket (see `mobile_bridge.register`'s `resume_session_id`) instead of minting a new one
+  // that the already-running backend run loop has no way of learning about. Without this, any
+  // reconnect mid-run orphaned the run permanently even though the device/Appium session itself
+  // was untouched.
+  let currentSessionId: string | undefined;
+
+  socket.on('connect', () => {
+    socket.emit('cli_auth', {
+      token: opts.authToken,
+      type: 'mobile',
+      platform: opts.platform,
+      deviceId: opts.deviceId,
+      skipAuth: false,
+      sessionId: currentSessionId,
+    });
+  });
+
   const sessionId = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => {
       socket.disconnect();
       reject(new Error('Socket.IO connection timed out'));
     }, 15_000);
 
-    socket.on('connect', () => {
-      // Authenticate as a mobile CLI client
-      socket.emit('cli_auth', {
-        token: opts.authToken,
-        type: 'mobile',
-        platform: opts.platform,
-        deviceId: opts.deviceId,
-        skipAuth: false,
-      });
-    });
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
     socket.on('cli_authenticated', (data: any) => {
       clearTimeout(timeout);
+      currentSessionId = data.session_id;
       resolve(data.session_id);
     });
 
@@ -156,7 +189,16 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
         case 'capture_state': {
           // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log('[Appium] Capturing screen state...');
-          const source = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`);
+          // `skip_tree` (vision mode): skip the `/source` accessibility-tree dump entirely.
+          // `/source` is a known-slow XCUITest operation on screens with complex native views
+          // (e.g. a live react-native-maps MapView) -- it reliably timed out at 20s on exactly
+          // that kind of screen in real testing. Vision mode never needs the tree (the LLM picks
+          // raw pixel coordinates off the screenshot instead of numbered elements), so skipping
+          // the call outright is the actual fix, not just a longer timeout on a call we don't need.
+          const skipTree = cmdData?.skip_tree === true;
+          const source = skipTree
+            ? null
+            : await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`);
           const screenshot = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/screenshot`);
           result = {
             screenshot_b64: screenshot?.value || '',
@@ -191,6 +233,15 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
             console.log(`[Appium] ✓ ${result.result}`);
           }
           /* eslint-enable no-console */
+          break;
+        }
+
+        case 'get_screen_size': {
+          const size = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/window/size`);
+          result = {
+            width: Number(size?.value?.width || 400),
+            height: Number(size?.value?.height || 800),
+          };
           break;
         }
 
@@ -415,6 +466,75 @@ async function executeAppiumAction(
     return { result: `Tapped ${target?.what || 'element'}` };
   }
 
+  if (action === 'long_press') {
+    if (!target?.bounds) return { error: 'Long-press target has no coordinates' };
+    const [x, y] = target.bounds.length === 2
+      ? target.bounds
+      : [target.bounds[0] + target.bounds[2] / 2, target.bounds[1] + target.bounds[3] / 2];
+    const duration = Math.max(300, Number(value || 800));
+    await fetchJson(`${base}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        actions: [{
+          type: 'pointer',
+          id: 'finger1',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pause', duration },
+            { type: 'pointerUp', button: 0 },
+          ],
+        }],
+      }),
+    });
+    return { result: `Long-pressed coordinates [${Math.round(x)}, ${Math.round(y)}] for ${duration}ms` };
+  }
+
+  if (action === 'drag') {
+    const from = target?.from_bounds;
+    const to = target?.to_bounds;
+    if (!from || !to) return { error: 'Drag target has no start/end coordinates' };
+    await fetchJson(`${base}/actions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        actions: [{
+          type: 'pointer',
+          id: 'finger1',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(from[0]), y: Math.round(from[1]) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pointerMove', duration: 500, x: Math.round(to[0]), y: Math.round(to[1]) },
+            { type: 'pointerUp', button: 0 },
+          ],
+        }],
+      }),
+    });
+    return { result: `Dragged from [${from[0]}, ${from[1]}] to [${to[0]}, ${to[1]}]` };
+  }
+
+  if (action === 'pinch') {
+    const bounds = target?.bounds;
+    const [x, y] = bounds?.length === 2
+      ? bounds
+      : bounds
+        ? [bounds[0] + bounds[2] / 2, bounds[1] + bounds[3] / 2]
+        : [undefined, undefined];
+    const zoomIn = value === 'in';
+    const script = platform === 'ios'
+      ? 'mobile: pinch'
+      : zoomIn ? 'mobile: pinchOpenGesture' : 'mobile: pinchCloseGesture';
+    const args = platform === 'ios'
+      ? [{ scale: zoomIn ? 2 : 0.5, velocity: 1 }]
+      : [{ ...(x !== undefined && y !== undefined ? { x: Math.round(x), y: Math.round(y) } : {}), percent: 0.5, steps: 20 }];
+    await fetchJson(`${base}/execute/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ script, args }),
+    });
+    return { result: `Pinched ${zoomIn ? 'in' : 'out'}` };
+  }
+
   if (action === 'type' || action === 'fill') {
     if (target?.bounds) {
       let x, y;
@@ -488,16 +608,61 @@ async function executeAppiumAction(
   }
 
   if (action === 'swipe' || action === 'scroll') {
-    const direction = target?.context || 'down';
-    // Use Appium's mobile:scroll gesture
-    await fetchJson(`${base}/execute/sync`, {
+    // `mobile:scroll` (the previous implementation) is UiAutomator2's *scroll-to-element*
+    // command -- it requires a `strategy`+`selector` (or `elementId`) identifying which
+    // scrollable container to search, and rejects a bare `direction` with a 400. That error was
+    // silently swallowed before fetchJson checked status codes, so every swipe/scroll had been
+    // silently doing nothing. A plain directional swipe with no target element needs the W3C
+    // Actions API instead -- the same pointer-gesture shape `tap` above already uses, just with
+    // a move-while-down between two points rather than a single press. Works identically on
+    // iOS and Android since it's the driver-agnostic W3C protocol, not an Appium `mobile: `
+    // script name that only one driver recognizes.
+    const direction = (target?.context || 'down') as 'up' | 'down' | 'left' | 'right';
+    const size = await fetchJson(`${base}/window/size`);
+    const width = Number(size?.value?.width) || 1080;
+    const height = Number(size?.value?.height) || 1920;
+
+    // Inset from the edges: a gesture starting within ~4pt of the screen edge can trigger an OS
+    // navigation gesture (back/home/notification shade) instead of scrolling the app's content.
+    const marginX = Math.round(width * 0.1);
+    const marginY = Math.round(height * 0.15);
+
+    let startX = width / 2;
+    let startY = height / 2;
+    let endX = width / 2;
+    let endY = height / 2;
+    if (direction === 'up') {
+      startY = height - marginY;
+      endY = marginY;
+    } else if (direction === 'down') {
+      startY = marginY;
+      endY = height - marginY;
+    } else if (direction === 'left') {
+      startX = width - marginX;
+      endX = marginX;
+    } else if (direction === 'right') {
+      startX = marginX;
+      endX = width - marginX;
+    }
+
+    await fetchJson(`${base}/actions`, {
       method: 'POST',
       body: JSON.stringify({
-        script: 'mobile:scroll',
-        args: [{ direction }],
+        actions: [{
+          type: 'pointer',
+          id: 'finger1',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, x: Math.round(startX), y: Math.round(startY) },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pause', duration: 100 },
+            { type: 'pointerMove', duration: 250, x: Math.round(endX), y: Math.round(endY) },
+            { type: 'pointerUp', button: 0 },
+          ],
+        }],
       }),
     });
-    return { result: `Scrolled ${direction}` };
+    return { result: `Swiped ${direction}` };
   }
 
   if (action === 'press_key') {
@@ -688,33 +853,95 @@ async function tryFind(baseUrl: string, strategy: string, value: string): Promis
  * Simple fetch wrapper for Appium WebDriver HTTP API.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic WebDriver JSON response shape not modeled client-side
-async function fetchJson(url: string, options?: { method?: string; body?: string }): Promise<any> {
-  return await new Promise((resolve, reject) => {
-    const parsedUrl = new URL(url);
-    const req = http.request(
-      {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: options?.method || 'GET',
-        headers: { 'Content-Type': 'application/json' },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch {
-            resolve(null);
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    if (options?.body) req.write(options.body);
-    req.end();
-  });
+const APPIUM_REQUEST_TIMEOUT_MS = 20_000;
+
+/**
+ * Session creation gets its own, much longer timeout than every other Appium call (tap/type/
+ * swipe/etc, which complete in well under a second once a session exists) -- and that timeout
+ * is platform-specific, because the two platforms' cold-start costs are entirely different
+ * orders of magnitude:
+ *
+ * Android (UiAutomator2): the FIRST `/session` call after a device (re)boot took ~11s on its
+ * own, measured directly against a real emulator -- UiAutomator2 has to install and start its
+ * on-device instrumentation server before it can even respond. 45s leaves healthy margin.
+ *
+ * iOS (XCUITest): the underlying driver has to compile and install WebDriverAgent (WDA) via a
+ * full `xcodebuild build-for-testing` on the FIRST session against a given simulator -- measured
+ * directly here, this alone exceeded the 45s Android timeout and was still running. Subsequent
+ * sessions against the same already-booted simulator reuse the built WDA and are fast, same as
+ * Android, but that first cold build needs several minutes of headroom or every fresh simulator
+ * fails with a misleading "Failed to connect" before the build ever finishes.
+ */
+const APPIUM_SESSION_CREATE_TIMEOUT_MS: Record<'android' | 'ios', number> = {
+  android: 45_000,
+  ios: 240_000,
+};
+
+/**
+ * Previously had no timeout (a hung Appium/device response left the request pending forever
+ * with nothing to detect it -- the backend's own 60s `send_and_wait` timeout was the only thing
+ * that would eventually notice), no status-code check (a 404/500 from Appium still resolved as
+ * if it had succeeded, its error body silently returned to the caller as if it were `.value`
+ * data), and no retry. Retrying is only safe here for connection-establishment failures
+ * (`ECONNREFUSED`) -- those mean Appium never received the request at all, so retrying can't
+ * double-apply an action. Any error after the request was actually sent (timeout, reset,
+ * malformed response) is surfaced as-is rather than silently retried, since a `tap` or `type`
+ * that already reached Appium must never be replayed.
+ */
+async function fetchJson(
+  url: string,
+  options?: { method?: string; body?: string },
+  attempt = 0,
+  timeoutMs = APPIUM_REQUEST_TIMEOUT_MS,
+): Promise<any> {
+  try {
+    return await new Promise((resolve, reject) => {
+      const parsedUrl = new URL(url);
+      const req = http.request(
+        {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port,
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: options?.method || 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          timeout: timeoutMs,
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
+          res.on('end', () => {
+            let parsed: any;
+            try {
+              parsed = data ? JSON.parse(data) : null;
+            } catch (err) {
+              reject(new Error(`Appium returned malformed JSON (status ${res.statusCode}): ${(err as Error).message}`));
+              return;
+            }
+            const statusCode = res.statusCode ?? 0;
+            if (statusCode >= 400) {
+              const message = parsed?.value?.message || parsed?.value?.error || JSON.stringify(parsed);
+              reject(new Error(`Appium request failed (status ${statusCode}): ${message}`));
+              return;
+            }
+            resolve(parsed);
+          });
+        },
+      );
+      req.on('timeout', () => {
+        req.destroy(new Error(`Appium request to ${parsedUrl.pathname} timed out after ${timeoutMs}ms`));
+      });
+      req.on('error', reject);
+      if (options?.body) req.write(options.body);
+      req.end();
+    });
+  } catch (err) {
+    const isConnRefused = (err as NodeJS.ErrnoException)?.code === 'ECONNREFUSED';
+    if (isConnRefused && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+      return fetchJson(url, options, attempt + 1, timeoutMs);
+    }
+    throw err;
+  }
 }
