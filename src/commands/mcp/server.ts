@@ -198,6 +198,154 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
     },
   );
 
+  server.tool(
+    'verify_mobile_implementation',
+    'Verify a mobile app implementation against a specific natural language goal on an iOS Simulator or Android Emulator via Appium.',
+    {
+      goal: z
+        .string()
+        .min(1)
+        .describe(
+          'The natural language goal to verify on mobile (e.g. "Tap Settings, open General, and verify About is visible")',
+        ),
+      platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe('Mobile platform ("ios" or "android"). Defaults to auto-detecting the booted device.'),
+      device_name: z.string().optional().describe('Specific simulator or device name to target.'),
+      app_identifier: z
+        .string()
+        .optional()
+        .describe('Bundle ID (iOS) or Package name (Android) of the target app.'),
+    },
+    async ({ goal, platform, device_name, app_identifier }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+      const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
+      const { connectAppiumTunnel } = await import(
+        '../../infrastructure/tunnel/appium-proxy/appium-tunnel.client.js'
+      );
+
+      const devices = detectDevices();
+      const matchedDevice =
+        devices.find((d) => {
+          if (platform && d.platform !== platform) return false;
+          if (device_name && !d.name.toLowerCase().includes(device_name.toLowerCase())) return false;
+          return true;
+        }) || devices[0];
+
+      if (!matchedDevice) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No active iOS Simulator or Android Emulator detected. Please boot a simulator/emulator and start Appium (`appium`).',
+            },
+          ],
+        };
+      }
+
+      const config = await ctx?.infra.config.loadGlobalConfig();
+      const token = (await ctx?.infra.auth.getToken())?.accessToken || '';
+      const apiBaseUrl = config?.apiUrl || 'http://localhost:8000';
+
+      let bridge: any = null;
+      let appiumTunnel: any = null;
+
+      try {
+        bridge = await startAppiumBridge({
+          apiBaseUrl,
+          authToken: token,
+          deviceId: matchedDevice.id,
+          platform: matchedDevice.platform,
+          deviceName: matchedDevice.name,
+          appiumUrl: 'http://localhost:4723',
+        });
+
+        appiumTunnel = await connectAppiumTunnel({
+          apiBaseUrl,
+          authToken: token,
+          workspaceId: activeWorkspaceId,
+          appiumUrl: 'http://localhost:4723',
+        });
+
+        const res = await api.post<any>(
+          `/api/v1/workspaces/${activeWorkspaceId}/mcp/mobile-start`,
+          {
+            goal,
+            platform: matchedDevice.platform,
+            device_name: matchedDevice.name,
+            app_identifier: app_identifier || undefined,
+            session_id: bridge.sessionId,
+          },
+          { timeout: 300_000 },
+        );
+
+        const runId = res.data?.run_id;
+        const lines: string[] = [
+          `📱 Mobile Run Started: ${runId}`,
+          `Device: ${matchedDevice.name} (${matchedDevice.platform.toUpperCase()})`,
+          `Goal: "${goal}"`,
+          '',
+        ];
+
+        // Poll for completion
+        let status = 'RUNNING';
+        let runOverview: any = null;
+        for (let i = 0; i < 60; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const overviewRes = await api.get<any>(
+              `/api/v1/workspaces/${activeWorkspaceId}/sessions/${runId}/overview`,
+            );
+            runOverview = overviewRes.data;
+            status = runOverview?.status?.toUpperCase() || 'RUNNING';
+            if (status === 'PASSED' || status === 'FAILED' || status === 'ERROR') {
+              break;
+            }
+          } catch {}
+        }
+
+        if (runOverview) {
+          lines.push(status === 'PASSED' ? '✅ PASSED' : '❌ FAILED');
+          if (runOverview.duration_ms)
+            lines.push(`Duration: ${Math.round(runOverview.duration_ms / 1000)}s`);
+          if (runOverview.steps && runOverview.steps.length > 0) {
+            lines.push('\nSteps Executed:');
+            for (const s of runOverview.steps) {
+              const icon = s.result?.status === 'passed' ? '✓' : '✗';
+              const title = s.decision?.title || s.label || s.action;
+              lines.push(`  ${icon} ${title}`);
+              if (s.result?.detail && s.result?.status !== 'passed') {
+                lines.push(`    → ${s.result.detail}`);
+              }
+            }
+          }
+          if (runOverview.summary) {
+            lines.push(`\nSummary:\n${runOverview.summary}`);
+          }
+        } else {
+          lines.push(`Run completed with status: ${status}`);
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `Error during mobile execution: ${err.message}` }],
+        };
+      } finally {
+        if (bridge) await bridge.close().catch(() => {});
+        if (appiumTunnel) await appiumTunnel.close().catch(() => {});
+      }
+    },
+  );
+
   // ── Resources ────────────────────────────────────────────
 
   server.resource(
