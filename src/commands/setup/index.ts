@@ -85,9 +85,12 @@ async function ensureAppium(ui: UIService, skipConfirm: boolean): Promise<void> 
   ui.warn('Appium is not installed.');
   if (!skipConfirm) {
     const { confirm } = await import('@inquirer/prompts');
-    const install = await confirm({ message: 'Install Appium now (npm install -g appium)?', default: true });
+    const install = await confirm({
+      message: 'Install Appium now (npm install -g appium)?',
+      default: true,
+    });
     if (!install) {
-      ui.hint('Skipped. Install it yourself with `npm install -g appium` when you\'re ready.');
+      ui.hint("Skipped. Install it yourself with `npm install -g appium` when you're ready.");
       return;
     }
   }
@@ -159,8 +162,7 @@ async function ensureDrivers(ui: UIService, skipConfirm: boolean): Promise<void>
   }
 }
 
-const FFMPEG_RELEASE_BASE =
-  'https://github.com/eugeneware/ffmpeg-static/releases/latest/download';
+const FFMPEG_RELEASE_BASE = 'https://github.com/eugeneware/ffmpeg-static/releases/latest/download';
 
 /** Static ffmpeg release asset for the current platform/arch, or null if none is published. */
 function ffmpegAssetName(): string | null {
@@ -213,7 +215,9 @@ async function ensureFfmpeg(ui: UIService, skipConfirm: boolean): Promise<void> 
     return;
   }
 
-  ui.warn('ffmpeg not found — needed for iOS screen recordings (Android records on-device, no ffmpeg needed).');
+  ui.warn(
+    'ffmpeg not found — needed for iOS screen recordings (Android records on-device, no ffmpeg needed).',
+  );
   if (!skipConfirm) {
     const { confirm } = await import('@inquirer/prompts');
     const install = await confirm({

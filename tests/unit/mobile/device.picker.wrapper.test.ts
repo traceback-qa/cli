@@ -73,7 +73,9 @@ describe('resolveVerifyDevice', () => {
     });
 
     expect(device).toEqual(iphone17);
-    expect(ui.info).toHaveBeenCalledWith('Running against: iPhone 17 (A3C3807E-1CE9-4CC0-B7A3-8900B5FD9F0A)');
+    expect(ui.info).toHaveBeenCalledWith(
+      'Running against: iPhone 17 (A3C3807E-1CE9-4CC0-B7A3-8900B5FD9F0A)',
+    );
   });
 
   it('fails with guidance when no devices are detected', async () => {
@@ -166,9 +168,7 @@ describe('resolveVerifyDevice', () => {
     });
 
     expect(device?.id).toBe('emulator-9999');
-    expect(ui.warn).toHaveBeenCalledWith(
-      expect.stringContaining('emulator-9999'),
-    );
+    expect(ui.warn).toHaveBeenCalledWith(expect.stringContaining('emulator-9999'));
   });
 
   it('uses an explicit id even when detection found nothing (no warning)', async () => {

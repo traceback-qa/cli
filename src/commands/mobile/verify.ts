@@ -10,7 +10,10 @@
 
 import type { CliContext } from '../../types/context.js';
 import type { MobileDevice } from '../../infrastructure/mobile/device.detector.js';
-import { startAppiumBridge, type AppiumSession } from '../../infrastructure/mobile/appium.bridge.js';
+import {
+  startAppiumBridge,
+  type AppiumSession,
+} from '../../infrastructure/mobile/appium.bridge.js';
 import { watchRun } from '../../infrastructure/socket/run-events.client.js';
 
 export const DEFAULT_APPIUM_URL = 'http://localhost:4723';
@@ -60,7 +63,9 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
       `Connected to ${opts.device.name} (socket: ${bridge.sessionId.slice(0, 12)}...)`,
     );
   } catch (error) {
-    bridgeSpinner.fail(`Failed to connect: ${error instanceof Error ? error.message : String(error)}`);
+    bridgeSpinner.fail(
+      `Failed to connect: ${error instanceof Error ? error.message : String(error)}`,
+    );
     ui.hint('Make sure Appium is running: `appium`');
     ui.hint('Missing Appium or a driver? Run `traceback setup`.');
     return;
@@ -93,7 +98,9 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
       runId = result.data.run_id;
       runSpinner.succeed(`Run started: ${runId}`);
     } catch (error) {
-      runSpinner.fail(`Failed to start run: ${error instanceof Error ? error.message : String(error)}`);
+      runSpinner.fail(
+        `Failed to start run: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return;
     }
 

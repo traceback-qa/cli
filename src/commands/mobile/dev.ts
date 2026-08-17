@@ -34,7 +34,8 @@ const METRO_STATUS_URL = 'http://localhost:8081/status';
 // piece of this feature that needs live verification against real `expo start --tunnel` output,
 // same as the EAS GraphQL schema needed live iteration earlier — fix the regex against the real
 // printed line if it doesn't match, rather than guessing further).
-const TUNNEL_URL_REGEX = /(exp:\/\/[^\s]+|https:\/\/[^\s]+\.exp\.direct[^\s]*|https:\/\/[^\s]*ngrok[^\s]*)/;
+const TUNNEL_URL_REGEX =
+  /(exp:\/\/[^\s]+|https:\/\/[^\s]+\.exp\.direct[^\s]*|https:\/\/[^\s]*ngrok[^\s]*)/;
 
 const TUNNEL_DETECT_TIMEOUT_MS = 60_000;
 
@@ -205,7 +206,9 @@ export function registerMobileDevCommands(mobile: Command, getContext: ContextGe
         await api.delete(`/api/v1/workspaces/${workspaceId}/mobile-sessions/${sessionId}`);
         stopSpinner.succeed('Device released');
       } catch {
-        stopSpinner.warn('Could not confirm the device was released — it will idle-timeout on its own.');
+        stopSpinner.warn(
+          'Could not confirm the device was released — it will idle-timeout on its own.',
+        );
       }
       expoChild?.kill();
     });
@@ -258,7 +261,7 @@ export function registerMobileDevCommands(mobile: Command, getContext: ContextGe
         runSpinner.succeed(`${res.data.status} — run ${res.data.run_id}`);
         ui.info(
           `View it in your dashboard: Runs > find run_id ${res.data.run_id}\n` +
-            '(no direct link here — this CLI has no config for the dashboard\'s own URL yet)',
+            "(no direct link here — this CLI has no config for the dashboard's own URL yet)",
         );
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled
       } catch (err: any) {

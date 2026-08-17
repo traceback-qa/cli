@@ -91,7 +91,7 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
     // every session after the first is fast, same as Android.
     // eslint-disable-next-line no-console
     console.log(
-      'ℹ First run on this simulator: iOS has to build WebDriverAgent (Appium\'s driver ' +
+      "ℹ First run on this simulator: iOS has to build WebDriverAgent (Appium's driver " +
         'companion app) via Xcode before it can start — this can take a few minutes. Later ' +
         'runs against the same simulator reuse it and start in seconds.',
     );
@@ -225,7 +225,7 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
             target,
             value,
             resolved,
-            opts.platform
+            opts.platform,
           );
           if (result.error) {
             console.log(`[Appium] ✗ ${result.error}`);
@@ -257,13 +257,14 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
           result = { result: `Navigated to ${url}` };
           break;
         }
-        
+
         case 'open_app': {
           const bundleId = cmdData.bundle_id || data.bundle_id;
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log(`[Appium] Opening app: ${bundleId}`);
           await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/activate_app`, {
             method: 'POST',
-            body: JSON.stringify({ appId: bundleId })
+            body: JSON.stringify({ appId: bundleId }),
           });
           result = { result: `Opened app ${bundleId}` };
           break;
@@ -271,10 +272,11 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
         case 'close_app': {
           const bundleId = cmdData.bundle_id || data.bundle_id;
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log(`[Appium] Closing app: ${bundleId}`);
           await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/terminate_app`, {
             method: 'POST',
-            body: JSON.stringify({ appId: bundleId })
+            body: JSON.stringify({ appId: bundleId }),
           });
           result = { result: `Closed app ${bundleId}` };
           break;
@@ -282,11 +284,14 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
         case 'open_url': {
           const url = cmdData.url || data.url;
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log(`[Native] Opening URL: ${url}`);
           if (opts.platform === 'ios') {
             execSync(`xcrun simctl openurl ${opts.deviceId} "${url}"`);
           } else {
-            execSync(`adb -s ${opts.deviceId} shell am start -a android.intent.action.VIEW -d "${url}"`);
+            execSync(
+              `adb -s ${opts.deviceId} shell am start -a android.intent.action.VIEW -d "${url}"`,
+            );
           }
           result = { result: `Opened URL ${url}` };
           break;
@@ -294,10 +299,11 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
         case 'simulate_fingerprint': {
           const fingerId = cmdData.finger_id || data.finger_id || 1;
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log(`[Appium] Simulating fingerprint ID: ${fingerId}`);
           await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/finger_print`, {
             method: 'POST',
-            body: JSON.stringify({ fingerprintId: fingerId })
+            body: JSON.stringify({ fingerprintId: fingerId }),
           });
           result = { result: `Simulated fingerprint ${fingerId}` };
           break;
@@ -310,38 +316,57 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
         }
 
         case 'start_recording': {
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log('[Native] Starting screen recording...');
           try {
             // Delete any stale recording file
             await fs.unlink(recordingPath).catch(() => {});
-            
+
             if (opts.platform === 'ios') {
-              recordingProcess = spawn('xcrun', ['simctl', 'io', opts.deviceId, 'recordVideo', '--force', recordingPath]);
+              recordingProcess = spawn('xcrun', [
+                'simctl',
+                'io',
+                opts.deviceId,
+                'recordVideo',
+                '--force',
+                recordingPath,
+              ]);
             } else {
               // Android: record to device sdcard first
               // We don't delete stale file on device for brevity, screenrecord overwrites by default usually, but we can rm it
-              execSync(`adb -s ${opts.deviceId} shell rm -f /sdcard/traceback_recording.mp4 || true`);
-              recordingProcess = spawn('adb', ['-s', opts.deviceId, 'shell', 'screenrecord', '/sdcard/traceback_recording.mp4']);
+              execSync(
+                `adb -s ${opts.deviceId} shell rm -f /sdcard/traceback_recording.mp4 || true`,
+              );
+              recordingProcess = spawn('adb', [
+                '-s',
+                opts.deviceId,
+                'shell',
+                'screenrecord',
+                '/sdcard/traceback_recording.mp4',
+              ]);
             }
-            
+
             // Ignore stdout/stderr but keep process running
             recordingProcess.stdout?.on('data', () => {});
             recordingProcess.stderr?.on('data', () => {});
-            
+
             result = { result: 'Started recording natively' };
-          } catch (e: any) {
+          } catch (e: unknown) {
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
             console.error('[Native] Error starting recording:', e);
-            result = { error: `Failed to start recording: ${e.message}` };
+            const message = e instanceof Error ? e.message : String(e);
+            result = { error: `Failed to start recording: ${message}` };
           }
           break;
         }
 
         case 'stop_recording': {
+          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
           console.log('[Native] Stopping screen recording...');
           if (recordingProcess) {
             // Send SIGINT so the recording finishes encoding properly
             recordingProcess.kill('SIGINT');
-            
+
             // Wait for it to cleanly exit
             await new Promise<void>((resolve) => {
               const timeout = setTimeout(resolve, 5000); // 5s fallback timeout
@@ -352,26 +377,30 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
             });
             recordingProcess = null;
           } else {
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
             console.log('[Native] No recording process found');
           }
-          
+
           try {
             if (opts.platform === 'android') {
               // Pull the file from Android sdcard
-              execSync(`adb -s ${opts.deviceId} pull /sdcard/traceback_recording.mp4 ${recordingPath}`);
+              execSync(
+                `adb -s ${opts.deviceId} pull /sdcard/traceback_recording.mp4 ${recordingPath}`,
+              );
               execSync(`adb -s ${opts.deviceId} shell rm /sdcard/traceback_recording.mp4 || true`);
             }
-            
+
             const videoBuffer = await fs.readFile(recordingPath);
             result = { video_b64: videoBuffer.toString('base64') };
-            
+
             // Cleanup local file
             await fs.unlink(recordingPath).catch(() => {});
-          } catch (e: any) {
+          } catch (e: unknown) {
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
             console.error('[Native] Error retrieving recording:', e);
             result = { video_b64: '' };
           }
-          
+
           break;
         }
 
@@ -416,6 +445,8 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
  * a precise Appium locator (strategy + value). This is much more reliable
  * than trying to match element descriptions with string manipulation.
  */
+type AppiumActionResult = { result: string } | { error: string };
+
 async function executeAppiumAction(
   appiumUrl: string,
   sessionId: string,
@@ -424,9 +455,8 @@ async function executeAppiumAction(
   target: any,
   value: string | null,
   resolved?: { strategy?: string; locator?: string } | null,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result shape varies by action type
   platform?: 'android' | 'ios',
-): Promise<any> {
+): Promise<AppiumActionResult> {
   const base = `${appiumUrl}/session/${sessionId}`;
 
   if (action === 'tap' || action === 'click') {
@@ -442,18 +472,20 @@ async function executeAppiumAction(
       await fetchJson(`${base}/actions`, {
         method: 'POST',
         body: JSON.stringify({
-          actions: [{
-            type: 'pointer',
-            id: 'finger1',
-            parameters: { pointerType: 'touch' },
-            actions: [
-              { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
-              { type: 'pointerDown', button: 0 },
-              { type: 'pause', duration: 50 },
-              { type: 'pointerUp', button: 0 }
-            ]
-          }]
-        })
+          actions: [
+            {
+              type: 'pointer',
+              id: 'finger1',
+              parameters: { pointerType: 'touch' },
+              actions: [
+                { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
+                { type: 'pointerDown', button: 0 },
+                { type: 'pause', duration: 50 },
+                { type: 'pointerUp', button: 0 },
+              ],
+            },
+          ],
+        }),
       });
       return { result: `Tapped coordinates [${Math.round(x)}, ${Math.round(y)}]` };
     }
@@ -468,27 +500,32 @@ async function executeAppiumAction(
 
   if (action === 'long_press') {
     if (!target?.bounds) return { error: 'Long-press target has no coordinates' };
-    const [x, y] = target.bounds.length === 2
-      ? target.bounds
-      : [target.bounds[0] + target.bounds[2] / 2, target.bounds[1] + target.bounds[3] / 2];
+    const [x, y] =
+      target.bounds.length === 2
+        ? target.bounds
+        : [target.bounds[0] + target.bounds[2] / 2, target.bounds[1] + target.bounds[3] / 2];
     const duration = Math.max(300, Number(value || 800));
     await fetchJson(`${base}/actions`, {
       method: 'POST',
       body: JSON.stringify({
-        actions: [{
-          type: 'pointer',
-          id: 'finger1',
-          parameters: { pointerType: 'touch' },
-          actions: [
-            { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
-            { type: 'pointerDown', button: 0 },
-            { type: 'pause', duration },
-            { type: 'pointerUp', button: 0 },
-          ],
-        }],
+        actions: [
+          {
+            type: 'pointer',
+            id: 'finger1',
+            parameters: { pointerType: 'touch' },
+            actions: [
+              { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
+              { type: 'pointerDown', button: 0 },
+              { type: 'pause', duration },
+              { type: 'pointerUp', button: 0 },
+            ],
+          },
+        ],
       }),
     });
-    return { result: `Long-pressed coordinates [${Math.round(x)}, ${Math.round(y)}] for ${duration}ms` };
+    return {
+      result: `Long-pressed coordinates [${Math.round(x)}, ${Math.round(y)}] for ${duration}ms`,
+    };
   }
 
   if (action === 'drag') {
@@ -498,17 +535,19 @@ async function executeAppiumAction(
     await fetchJson(`${base}/actions`, {
       method: 'POST',
       body: JSON.stringify({
-        actions: [{
-          type: 'pointer',
-          id: 'finger1',
-          parameters: { pointerType: 'touch' },
-          actions: [
-            { type: 'pointerMove', duration: 0, x: Math.round(from[0]), y: Math.round(from[1]) },
-            { type: 'pointerDown', button: 0 },
-            { type: 'pointerMove', duration: 500, x: Math.round(to[0]), y: Math.round(to[1]) },
-            { type: 'pointerUp', button: 0 },
-          ],
-        }],
+        actions: [
+          {
+            type: 'pointer',
+            id: 'finger1',
+            parameters: { pointerType: 'touch' },
+            actions: [
+              { type: 'pointerMove', duration: 0, x: Math.round(from[0]), y: Math.round(from[1]) },
+              { type: 'pointerDown', button: 0 },
+              { type: 'pointerMove', duration: 500, x: Math.round(to[0]), y: Math.round(to[1]) },
+              { type: 'pointerUp', button: 0 },
+            ],
+          },
+        ],
       }),
     });
     return { result: `Dragged from [${from[0]}, ${from[1]}] to [${to[0]}, ${to[1]}]` };
@@ -516,18 +555,29 @@ async function executeAppiumAction(
 
   if (action === 'pinch') {
     const bounds = target?.bounds;
-    const [x, y] = bounds?.length === 2
-      ? bounds
-      : bounds
-        ? [bounds[0] + bounds[2] / 2, bounds[1] + bounds[3] / 2]
-        : [undefined, undefined];
+    const [x, y] =
+      bounds?.length === 2
+        ? bounds
+        : bounds
+          ? [bounds[0] + bounds[2] / 2, bounds[1] + bounds[3] / 2]
+          : [undefined, undefined];
     const zoomIn = value === 'in';
-    const script = platform === 'ios'
-      ? 'mobile: pinch'
-      : zoomIn ? 'mobile: pinchOpenGesture' : 'mobile: pinchCloseGesture';
-    const args = platform === 'ios'
-      ? [{ scale: zoomIn ? 2 : 0.5, velocity: 1 }]
-      : [{ ...(x !== undefined && y !== undefined ? { x: Math.round(x), y: Math.round(y) } : {}), percent: 0.5, steps: 20 }];
+    const script =
+      platform === 'ios'
+        ? 'mobile: pinch'
+        : zoomIn
+          ? 'mobile: pinchOpenGesture'
+          : 'mobile: pinchCloseGesture';
+    const args =
+      platform === 'ios'
+        ? [{ scale: zoomIn ? 2 : 0.5, velocity: 1 }]
+        : [
+            {
+              ...(x !== undefined && y !== undefined ? { x: Math.round(x), y: Math.round(y) } : {}),
+              percent: 0.5,
+              steps: 20,
+            },
+          ];
     await fetchJson(`${base}/execute/sync`, {
       method: 'POST',
       body: JSON.stringify({ script, args }),
@@ -549,30 +599,36 @@ async function executeAppiumAction(
       await fetchJson(`${base}/actions`, {
         method: 'POST',
         body: JSON.stringify({
-          actions: [{
-            type: 'pointer',
-            id: 'finger1',
-            parameters: { pointerType: 'touch' },
-            actions: [
-              { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
-              { type: 'pointerDown', button: 0 },
-              { type: 'pause', duration: 50 },
-              { type: 'pointerUp', button: 0 }
-            ]
-          }]
-        })
+          actions: [
+            {
+              type: 'pointer',
+              id: 'finger1',
+              parameters: { pointerType: 'touch' },
+              actions: [
+                { type: 'pointerMove', duration: 0, x: Math.round(x), y: Math.round(y) },
+                { type: 'pointerDown', button: 0 },
+                { type: 'pause', duration: 50 },
+                { type: 'pointerUp', button: 0 },
+              ],
+            },
+          ],
+        }),
       });
       // Then type
       await fetchJson(`${base}/actions`, {
         method: 'POST',
         body: JSON.stringify({
-          actions: [{
-            type: 'key',
-            id: 'keyboard',
-            actions: (value || '').split('').map(char => ({ type: 'keyDown', value: char }))
-              .concat((value || '').split('').map(char => ({ type: 'keyUp', value: char })))
-          }]
-        })
+          actions: [
+            {
+              type: 'key',
+              id: 'keyboard',
+              actions: (value || '')
+                .split('')
+                .map((char) => ({ type: 'keyDown', value: char }))
+                .concat((value || '').split('').map((char) => ({ type: 'keyUp', value: char }))),
+            },
+          ],
+        }),
       });
       return { result: `Typed '${value}' at coordinates [${Math.round(x)}, ${Math.round(y)}]` };
     }
@@ -582,15 +638,17 @@ async function executeAppiumAction(
       await fetchJson(`${base}/actions`, {
         method: 'POST',
         body: JSON.stringify({
-          actions: [{
-            type: 'key',
-            id: 'keyboard',
-            actions: (value || '').split('').flatMap(char => [
+          actions: [
+            {
+              type: 'key',
+              id: 'keyboard',
+              actions: (value || '').split('').flatMap((char) => [
                 { type: 'keyDown', value: char },
-                { type: 'keyUp', value: char }
-            ])
-          }]
-        })
+                { type: 'keyUp', value: char },
+              ]),
+            },
+          ],
+        }),
       });
       return { result: `Typed '${value}'` };
     }
@@ -648,18 +706,20 @@ async function executeAppiumAction(
     await fetchJson(`${base}/actions`, {
       method: 'POST',
       body: JSON.stringify({
-        actions: [{
-          type: 'pointer',
-          id: 'finger1',
-          parameters: { pointerType: 'touch' },
-          actions: [
-            { type: 'pointerMove', duration: 0, x: Math.round(startX), y: Math.round(startY) },
-            { type: 'pointerDown', button: 0 },
-            { type: 'pause', duration: 100 },
-            { type: 'pointerMove', duration: 250, x: Math.round(endX), y: Math.round(endY) },
-            { type: 'pointerUp', button: 0 },
-          ],
-        }],
+        actions: [
+          {
+            type: 'pointer',
+            id: 'finger1',
+            parameters: { pointerType: 'touch' },
+            actions: [
+              { type: 'pointerMove', duration: 0, x: Math.round(startX), y: Math.round(startY) },
+              { type: 'pointerDown', button: 0 },
+              { type: 'pause', duration: 100 },
+              { type: 'pointerMove', duration: 250, x: Math.round(endX), y: Math.round(endY) },
+              { type: 'pointerUp', button: 0 },
+            ],
+          },
+        ],
       }),
     });
     return { result: `Swiped ${direction}` };
@@ -667,28 +727,31 @@ async function executeAppiumAction(
 
   if (action === 'press_key') {
     const key = (value || '').toLowerCase();
-    
+
     if (key === 'back') {
       await fetchJson(`${base}/back`, { method: 'POST', body: '{}' });
     } else if (key === 'home') {
       if (platform === 'ios') {
         await fetchJson(`${base}/execute/sync`, {
           method: 'POST',
-          body: JSON.stringify({ script: 'mobile: pressButton', args: [{ name: 'home' }] })
+          body: JSON.stringify({ script: 'mobile: pressButton', args: [{ name: 'home' }] }),
         });
       } else {
         await fetchJson(`${base}/appium/device/press_keycode`, {
           method: 'POST',
-          body: JSON.stringify({ keycode: 3 })
+          body: JSON.stringify({ keycode: 3 }),
         });
       }
     } else if (key === 'power') {
       if (platform === 'ios') {
-        await fetchJson(`${base}/appium/device/lock`, { method: 'POST', body: JSON.stringify({ seconds: 0 }) });
+        await fetchJson(`${base}/appium/device/lock`, {
+          method: 'POST',
+          body: JSON.stringify({ seconds: 0 }),
+        });
       } else {
         await fetchJson(`${base}/appium/device/press_keycode`, {
           method: 'POST',
-          body: JSON.stringify({ keycode: 26 })
+          body: JSON.stringify({ keycode: 26 }),
         });
       }
     }
@@ -703,9 +766,9 @@ async function executeAppiumAction(
           location: {
             latitude: target.latitude,
             longitude: target.longitude,
-            altitude: target.altitude || 0
-          }
-        })
+            altitude: target.altitude || 0,
+          },
+        }),
       });
       return { result: `Set location to lat: ${target.latitude}, lon: ${target.longitude}` };
     }
@@ -852,7 +915,6 @@ async function tryFind(baseUrl: string, strategy: string, value: string): Promis
 /**
  * Simple fetch wrapper for Appium WebDriver HTTP API.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic WebDriver JSON response shape not modeled client-side
 const APPIUM_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
@@ -893,6 +955,7 @@ async function fetchJson(
   options?: { method?: string; body?: string },
   attempt = 0,
   timeoutMs = APPIUM_REQUEST_TIMEOUT_MS,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic WebDriver JSON response shape not modeled client-side
 ): Promise<any> {
   try {
     return await new Promise((resolve, reject) => {
@@ -912,16 +975,22 @@ async function fetchJson(
             data += chunk;
           });
           res.on('end', () => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic WebDriver JSON response shape not modeled client-side
             let parsed: any;
             try {
               parsed = data ? JSON.parse(data) : null;
             } catch (err) {
-              reject(new Error(`Appium returned malformed JSON (status ${res.statusCode}): ${(err as Error).message}`));
+              reject(
+                new Error(
+                  `Appium returned malformed JSON (status ${res.statusCode}): ${(err as Error).message}`,
+                ),
+              );
               return;
             }
             const statusCode = res.statusCode ?? 0;
             if (statusCode >= 400) {
-              const message = parsed?.value?.message || parsed?.value?.error || JSON.stringify(parsed);
+              const message =
+                parsed?.value?.message || parsed?.value?.error || JSON.stringify(parsed);
               reject(new Error(`Appium request failed (status ${statusCode}): ${message}`));
               return;
             }
@@ -930,7 +999,9 @@ async function fetchJson(
         },
       );
       req.on('timeout', () => {
-        req.destroy(new Error(`Appium request to ${parsedUrl.pathname} timed out after ${timeoutMs}ms`));
+        req.destroy(
+          new Error(`Appium request to ${parsedUrl.pathname} timed out after ${timeoutMs}ms`),
+        );
       });
       req.on('error', reject);
       if (options?.body) req.write(options.body);
@@ -940,7 +1011,7 @@ async function fetchJson(
     const isConnRefused = (err as NodeJS.ErrnoException)?.code === 'ECONNREFUSED';
     if (isConnRefused && attempt < 2) {
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-      return fetchJson(url, options, attempt + 1, timeoutMs);
+      return await fetchJson(url, options, attempt + 1, timeoutMs);
     }
     throw err;
   }

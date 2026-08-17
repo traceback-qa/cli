@@ -81,7 +81,9 @@ const AGENT_LABELS: Record<AgentTarget, string> = {
 };
 
 export function registerSkillsCommands(program: Command, getContext: ContextGetter): void {
-  const skills = program.command('skills').description('Install and manage Traceback skills for AI agents');
+  const skills = program
+    .command('skills')
+    .description('Install and manage Traceback skills for AI agents');
 
   skills
     .command('init')
@@ -145,7 +147,9 @@ async function initializeSkills(ctx: CliContext, options: InitOptions): Promise<
   ui.success(`Traceback skills initialized for ${AGENT_LABELS[target]}.`);
   ui.info(`Skills: ${skillRoot}`);
   ui.info(`Adapter: ${adapterPath}`);
-  ui.info(`Installed ${written} skill${written === 1 ? '' : 's'}${skipped ? ` (${skipped} existing file${skipped === 1 ? '' : 's'} kept)` : ''}.`);
+  ui.info(
+    `Installed ${written} skill${written === 1 ? '' : 's'}${skipped ? ` (${skipped} existing file${skipped === 1 ? '' : 's'} kept)` : ''}.`,
+  );
   if (adapterResult === 'skipped') {
     ui.warn(`Adapter already exists and is not Traceback-managed: ${adapterPath}`);
     ui.hint('Review it manually and add the Traceback skills path if desired.');
@@ -161,7 +165,9 @@ async function resolveAgentTarget(
   const normalized = requested.toLowerCase() as AgentTarget | 'auto';
   if (normalized !== 'auto') {
     if (normalized in AGENT_LABELS) return normalized as AgentTarget;
-    ctx.infra.ui.error(`Unknown agent ${requested}. Use opencode, claude, cursor, codex, or generic.`);
+    ctx.infra.ui.error(
+      `Unknown agent ${requested}. Use opencode, claude, cursor, codex, or generic.`,
+    );
     return null;
   }
 
@@ -186,13 +192,18 @@ async function resolveAgentTarget(
 
 function detectAgents(projectRoot: string): AgentTarget[] {
   const detected: AgentTarget[] = [];
-  if (fs.existsSync(path.join(projectRoot, '.opencode')) || process.env.OPENCODE) detected.push('opencode');
-  if (fs.existsSync(path.join(projectRoot, '.claude')) || fs.existsSync(path.join(projectRoot, 'CLAUDE.md'))) {
+  if (fs.existsSync(path.join(projectRoot, '.opencode')) || process.env.OPENCODE)
+    detected.push('opencode');
+  if (
+    fs.existsSync(path.join(projectRoot, '.claude')) ||
+    fs.existsSync(path.join(projectRoot, 'CLAUDE.md'))
+  ) {
     detected.push('claude');
   }
   if (fs.existsSync(path.join(projectRoot, '.cursor'))) detected.push('cursor');
   if (fs.existsSync(path.join(projectRoot, '.codex'))) detected.push('codex');
-  if (fs.existsSync(path.join(projectRoot, 'AGENTS.md')) || detected.length === 0) detected.push('generic');
+  if (fs.existsSync(path.join(projectRoot, 'AGENTS.md')) || detected.length === 0)
+    detected.push('generic');
   return detected;
 }
 
@@ -224,7 +235,11 @@ function getAdapterPath(target: AgentTarget, global: boolean): string {
 }
 
 function getAdapterContent(target: AgentTarget, skillReference: string): string {
-  const common = `Read the relevant Traceback skill before planning or executing a related task. Skills are guidance, not permission to access production systems or secrets.\n\nSkill directory: ${skillReference}\n\nAvailable skills:\n${Object.keys(SKILLS).map((name) => `- ${name}/SKILL.md`).join('\n')}`;
+  const common = `Read the relevant Traceback skill before planning or executing a related task. Skills are guidance, not permission to access production systems or secrets.\n\nSkill directory: ${skillReference}\n\nAvailable skills:\n${Object.keys(
+    SKILLS,
+  )
+    .map((name) => `- ${name}/SKILL.md`)
+    .join('\n')}`;
   if (target === 'cursor') {
     return `---\ndescription: Traceback CLI and mobile testing skills\nalwaysApply: true\n---\n\n${common}`;
   }
@@ -244,7 +259,11 @@ function writeOwnedSkill(filePath: string, content: string): 'written' | 'skippe
   return 'written';
 }
 
-function upsertAdapter(filePath: string, content: string, replaceWholeFile: boolean): 'written' | 'skipped' {
+function upsertAdapter(
+  filePath: string,
+  content: string,
+  replaceWholeFile: boolean,
+): 'written' | 'skipped' {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   if (!fs.existsSync(filePath)) {
     fs.writeFileSync(filePath, `${content.trim()}\n`, 'utf8');
@@ -253,7 +272,10 @@ function upsertAdapter(filePath: string, content: string, replaceWholeFile: bool
 
   const existing = fs.readFileSync(filePath, 'utf8');
   if (replaceWholeFile) {
-    if (!existing.includes(START_MARKER) && !existing.includes('Traceback CLI and mobile testing skills')) {
+    if (
+      !existing.includes(START_MARKER) &&
+      !existing.includes('Traceback CLI and mobile testing skills')
+    ) {
       return 'skipped';
     }
     fs.writeFileSync(filePath, `${content.trim()}\n`, 'utf8');
@@ -273,8 +295,12 @@ function upsertAdapter(filePath: string, content: string, replaceWholeFile: bool
 }
 
 function listSkills(ctx: CliContext, global: boolean): void {
-  const root = global ? path.join(getConfigDir(), 'skills') : path.join(process.cwd(), '.traceback', 'skills');
-  const installed = Object.keys(SKILLS).filter((name) => fs.existsSync(path.join(root, name, 'SKILL.md')));
+  const root = global
+    ? path.join(getConfigDir(), 'skills')
+    : path.join(process.cwd(), '.traceback', 'skills');
+  const installed = Object.keys(SKILLS).filter((name) =>
+    fs.existsSync(path.join(root, name, 'SKILL.md')),
+  );
   if (ctx.flags.json) {
     ctx.infra.ui.renderJson({ root, skills: installed });
     return;
@@ -285,20 +311,30 @@ function listSkills(ctx: CliContext, global: boolean): void {
     return;
   }
   ctx.infra.ui.info(`Traceback skills at ${root}:`);
-  ctx.infra.ui.table(['Skill', 'Status'], installed.map((name) => [name, 'installed']));
+  ctx.infra.ui.table(
+    ['Skill', 'Status'],
+    installed.map((name) => [name, 'installed']),
+  );
 }
 
 function doctorSkills(ctx: CliContext, global: boolean): void {
-  const root = global ? path.join(getConfigDir(), 'skills') : path.join(process.cwd(), '.traceback', 'skills');
-  const missing = Object.keys(SKILLS).filter((name) => !fs.existsSync(path.join(root, name, 'SKILL.md')));
-  const adapterCandidates = (Object.keys(AGENT_LABELS) as AgentTarget[]).map((target) => getAdapterPath(target, global));
+  const root = global
+    ? path.join(getConfigDir(), 'skills')
+    : path.join(process.cwd(), '.traceback', 'skills');
+  const missing = Object.keys(SKILLS).filter(
+    (name) => !fs.existsSync(path.join(root, name, 'SKILL.md')),
+  );
+  const adapterCandidates = (Object.keys(AGENT_LABELS) as AgentTarget[]).map((target) =>
+    getAdapterPath(target, global),
+  );
   const adapters = [...new Set(adapterCandidates.filter((filePath) => fs.existsSync(filePath)))];
 
   if (ctx.flags.json) {
     ctx.infra.ui.renderJson({ root, missing, adapters });
     return;
   }
-  if (missing.length === 0) ctx.infra.ui.success(`All ${Object.keys(SKILLS).length} Traceback skills are present.`);
+  if (missing.length === 0)
+    ctx.infra.ui.success(`All ${Object.keys(SKILLS).length} Traceback skills are present.`);
   else ctx.infra.ui.warn(`Missing skills: ${missing.join(', ')}`);
   if (adapters.length) ctx.infra.ui.info(`Adapters found: ${adapters.join(', ')}`);
   else ctx.infra.ui.warn('No agent adapter found. Run `traceback skills init --agent <agent>`.');
