@@ -11,6 +11,11 @@
 import type { CliContext } from '../../types/context.js';
 import type { MobileDevice } from '../../infrastructure/mobile/device.detector.js';
 import { startAppiumBridge, type AppiumSession } from '../../infrastructure/mobile/appium.bridge.js';
+import { ensureAppiumServer, type AppiumServerHandle } from '../../infrastructure/mobile/appium.server.js';
+import {
+  connectAppiumTunnel,
+  type AppiumTunnelHandle,
+} from '../../infrastructure/tunnel/appium-proxy/appium-tunnel.client.js';
 import { watchRun } from '../../infrastructure/socket/run-events.client.js';
 
 export const DEFAULT_APPIUM_URL = 'http://localhost:4723';
@@ -45,6 +50,18 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
 
   const config = await configService.loadGlobalConfig();
   let bridge: AppiumSession | null = null;
+  let appiumTunnel: AppiumTunnelHandle | null = null;
+  let appiumServer: AppiumServerHandle | null = null;
+
+  const appiumUrl = opts.appiumUrl || DEFAULT_APPIUM_URL;
+  const serverSpinner = ui.spinner('Starting Appium...');
+  try {
+    appiumServer = await ensureAppiumServer(appiumUrl);
+    serverSpinner.succeed(appiumServer.spawned ? 'Appium started' : 'Appium already running');
+  } catch (error) {
+    serverSpinner.fail(error instanceof Error ? error.message : String(error));
+    return;
+  }
 
   const bridgeSpinner = ui.spinner(`Connecting to ${opts.device.name} via Appium...`);
   try {
@@ -54,17 +71,38 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
       deviceId: opts.device.id,
       platform: opts.platform,
       deviceName: opts.device.name,
-      appiumUrl: opts.appiumUrl || DEFAULT_APPIUM_URL,
+      appiumUrl,
     });
-    bridgeSpinner.succeed(
-      `Connected to ${opts.device.name} (socket: ${bridge.sessionId.slice(0, 12)}...)`,
-    );
   } catch (error) {
     bridgeSpinner.fail(`Failed to connect: ${error instanceof Error ? error.message : String(error)}`);
-    ui.hint('Make sure Appium is running: `appium`');
-    ui.hint('Missing Appium or a driver? Run `traceback setup`.');
+    ui.hint('Missing an Appium driver? Run `traceback setup`.');
+    await appiumServer.stop();
     return;
   }
+
+  // Also open the generic Appium HTTP tunnel, workspace-scoped (not session-scoped
+  // like the bridge above) -- additive, same as the Pre-made-test path in
+  // commands/tests/index.ts. Separate try/catch so a tunnel failure closes the
+  // already-open bridge instead of leaking a live Appium session on the device.
+  try {
+    appiumTunnel = await connectAppiumTunnel({
+      apiBaseUrl: config.apiUrl,
+      authToken: token.accessToken,
+      workspaceId: opts.workspaceId,
+      appiumUrl,
+    });
+  } catch (error) {
+    bridgeSpinner.fail(
+      `Failed to open Appium tunnel: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    await bridge.close();
+    await appiumServer.stop();
+    return;
+  }
+
+  bridgeSpinner.succeed(
+    `Connected to ${opts.device.name} (socket: ${bridge.sessionId.slice(0, 12)}...)`,
+  );
 
   const controller = new AbortController();
   let interrupted = false;
@@ -111,9 +149,14 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
   } finally {
     process.removeListener('SIGINT', onInterrupt);
     controller.abort();
+    appiumTunnel?.close();
     if (bridge) {
       await bridge.close();
       ui.info('Appium session closed.');
+    }
+    if (appiumServer?.spawned) {
+      await appiumServer.stop();
+      ui.info('Appium server stopped.');
     }
   }
 }

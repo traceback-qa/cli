@@ -22,6 +22,15 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
     api.setBaseUrl(envApiUrl);
   }
 
+  // Auto-populate active workspace from stored CLI configuration
+  try {
+    const config = await ctx?.infra.config.loadGlobalConfig();
+    if (config?.workspaceId) {
+      activeWorkspaceId = config.workspaceId;
+      activeWorkspaceName = config.workspaceId;
+    }
+  } catch {}
+
   // ── Workspace tools ──────────────────────────────────────
 
   server.tool('list_workspaces', 'List all workspaces the user has access to', {}, async () => {
@@ -30,13 +39,16 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
         content: [{ type: 'text', text: 'Not authenticated. Run `traceback auth login` first.' }],
       };
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
-      const res = await api.get<any[]>('/api/v1/workspaces');
-      const workspaces = res.data;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
-      const lines = workspaces.map((w: any) => `• ${w.name} (${w.id})`).join('\n');
+      const res = await api.get<any>('/api/v1/workspaces');
+      const workspaces = Array.isArray(res.data) ? res.data : res.data?.data || [];
+      const lines = workspaces
+        .map((w: any) => {
+          const id = w.workspace_id || w.id || w.slug;
+          const name = w.name || w.workspace_name || id;
+          return `• ${name} (${id})`;
+        })
+        .join('\n');
       return { content: [{ type: 'text', text: lines || 'No workspaces found.' }] };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
     } catch (err: any) {
       return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
     }
@@ -194,6 +206,169 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
       } catch (err: any) {
         return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'verify_mobile_implementation',
+    'Verify a mobile app implementation against a specific natural language goal on an iOS Simulator or Android Emulator via Appium.',
+    {
+      goal: z
+        .string()
+        .min(1)
+        .describe(
+          'The natural language goal to verify on mobile (e.g. "Tap Settings, open General, and verify About is visible")',
+        ),
+      platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe('Mobile platform ("ios" or "android"). Defaults to auto-detecting the booted device.'),
+      device_name: z.string().optional().describe('Specific simulator or device name to target.'),
+      app_identifier: z
+        .string()
+        .optional()
+        .describe('Bundle ID (iOS) or Package name (Android) of the target app.'),
+    },
+    async ({ goal, platform, device_name, app_identifier }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+      const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
+      const { ensureAppiumServer } = await import('../../infrastructure/mobile/appium.server.js');
+      const { connectAppiumTunnel } = await import(
+        '../../infrastructure/tunnel/appium-proxy/appium-tunnel.client.js'
+      );
+
+      const devices = detectDevices();
+      const matchedDevice =
+        devices.find((d) => {
+          if (platform && d.platform !== platform) return false;
+          if (device_name && !d.name.toLowerCase().includes(device_name.toLowerCase())) return false;
+          return true;
+        }) || devices[0];
+
+      if (!matchedDevice) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No active iOS Simulator or Android Emulator detected. Please boot a simulator/emulator and start Appium (`appium`).',
+            },
+          ],
+        };
+      }
+
+      const config = await ctx?.infra.config.loadGlobalConfig();
+      const token = (await ctx?.infra.auth.getToken())?.accessToken || '';
+      const apiBaseUrl = config?.apiUrl || 'http://localhost:8000';
+
+      let bridge: any = null;
+      let appiumTunnel: any = null;
+      let appiumServer: Awaited<ReturnType<typeof ensureAppiumServer>> | null = null;
+
+      try {
+        appiumServer = await ensureAppiumServer('http://localhost:4723');
+
+        bridge = await startAppiumBridge({
+          apiBaseUrl,
+          authToken: token,
+          deviceId: matchedDevice.id,
+          platform: matchedDevice.platform,
+          deviceName: matchedDevice.name,
+          appiumUrl: 'http://localhost:4723',
+        });
+
+        appiumTunnel = await connectAppiumTunnel({
+          apiBaseUrl,
+          authToken: token,
+          workspaceId: activeWorkspaceId,
+          appiumUrl: 'http://localhost:4723',
+        });
+
+        const res = await api.post<any>(
+          `/api/v1/workspaces/${activeWorkspaceId}/mcp/mobile-start`,
+          {
+            goal,
+            platform: matchedDevice.platform,
+            device_name: matchedDevice.name,
+            app_identifier: app_identifier || undefined,
+            session_id: bridge.sessionId,
+          },
+          { timeout: 300_000 },
+        );
+
+        const runId = res.data?.run_id;
+        const lines: string[] = [
+          `📱 Mobile Run Started: ${runId}`,
+          `Device: ${matchedDevice.name} (${matchedDevice.platform.toUpperCase()})`,
+          `Goal: "${goal}"`,
+          '',
+        ];
+
+        // Poll for completion
+        let status = 'RUNNING';
+        let runOverview: any = null;
+        for (let i = 0; i < 60; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const overviewRes = await api.get<any>(
+              `/api/v1/workspaces/${activeWorkspaceId}/sessions/${runId}/overview`,
+            );
+            runOverview = overviewRes.data;
+            status = runOverview?.status?.toUpperCase() || 'RUNNING';
+            if (status === 'PASSED' || status === 'FAILED' || status === 'ERROR') {
+              break;
+            }
+          } catch {}
+        }
+
+        if (runOverview) {
+          lines.push(status === 'PASSED' ? '✅ PASSED' : '❌ FAILED');
+          if (runOverview.duration_ms)
+            lines.push(`Duration: ${Math.round(runOverview.duration_ms / 1000)}s`);
+          if (runOverview.steps && runOverview.steps.length > 0) {
+            lines.push('\nSteps Executed:');
+            for (const s of runOverview.steps) {
+              const icon = s.result?.status === 'passed' ? '✓' : '✗';
+              const title = s.decision?.title || s.label || s.action;
+              lines.push(`  ${icon} ${title}`);
+              if (s.result?.detail && s.result?.status !== 'passed') {
+                lines.push(`    → ${s.result.detail}`);
+              }
+            }
+          }
+          if (runOverview.summary) {
+            lines.push(`\nSummary:\n${runOverview.summary}`);
+          }
+        } else {
+          lines.push(`Run completed with status: ${status}`);
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+      } catch (err: any) {
+        return {
+          content: [{ type: 'text', text: `Error during mobile execution: ${err.message}` }],
+        };
+      } finally {
+        if (bridge) {
+          try {
+            await bridge.close();
+          } catch {}
+        }
+        if (appiumTunnel) {
+          try {
+            appiumTunnel.close();
+          } catch {}
+        }
+        if (appiumServer?.spawned) {
+          await appiumServer.stop().catch(() => {});
+        }
       }
     },
   );
