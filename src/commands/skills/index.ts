@@ -23,9 +23,13 @@ const SKILLS: Record<string, string> = {
   'mobile-testing': `${SKILL_MARKER}
 # Traceback mobile testing
 
-Use the Traceback CLI for goal-based mobile verification against a running Android emulator or iOS simulator.
+When to run this: as soon as a mobile app change is finished, not only when the user explicitly asks for a test. Write the code, then immediately verify it on-device before reporting the task done.
 
-## Preferred flow
+## Preferred trigger — MCP tool
+
+If Traceback is connected over MCP, call the \`verify_mobile_implementation\` tool right after finishing the change, with a specific natural-language goal (name the screen, interaction, or state to check). Do not stop until it reports a pass; if it fails, read the failure detail, fix the code, and verify again. This tool detects the booted simulator/emulator and manages the Appium session itself — no separate setup call needed from the agent.
+
+## Terminal flow (no MCP connection)
 
 1. Run traceback setup once to install Appium and the platform drivers.
 2. Run traceback tests and choose Mobile tests.
@@ -42,6 +46,31 @@ traceback mobile verify --goal "Open General settings" --platform ios
 Use --device to pin a serial, UDID, or detected device name. Use --workspace when the active workspace is not the intended one.
 
 Do not invent an app bundle id for an already-open app. The local mobile relay attaches to the app currently open on the selected device unless an explicit app/package option is supplied.
+`,
+  'web-testing': `${SKILL_MARKER}
+# Traceback web testing
+
+When to run this: as soon as a UI/web change is finished, not only when the user explicitly asks for a test. Write the code, then immediately verify it in a real browser before reporting the task done. Do not stop until verification passes — if it fails, read the failure detail, fix the code, and verify again.
+
+## Preferred trigger — MCP tool
+
+If Traceback is connected over MCP, call the \`verify_implementation\` tool right after finishing the change:
+
+- goal: a specific, observable outcome — name the element, page state, or behavior to check, not a vague "make sure it works."
+- url: the page to check. A localhost URL (e.g. http://localhost:3000/settings) is fine — the tool automatically launches a local browser tunnel so the agent's verification run can reach a dev server that only exists on this machine. No manual tunnel setup needed.
+
+This is the same tool the \`traceback_tdd\` MCP prompt describes: write the code, then immediately verify — never skip straight from "code compiles" to "done."
+
+## Terminal flow (no MCP connection)
+
+1. Run traceback tests and choose Web tests.
+2. Pick a saved test, or run one against the environment/URL relevant to the change.
+3. Watch the run live when prompted, so a failure is caught immediately rather than discovered later.
+
+## Notes
+
+- Prefer verifying against the actual page/flow touched by the change, not the whole app — a narrow, specific goal produces a more useful pass/fail signal than a broad one.
+- A passing verification is evidence the change works from a real browser's perspective (rendered DOM, real navigation, real network calls) — stronger than a type-check or unit test alone for UI-facing work, but not a replacement for either.
 `,
   'emulator-selection': `${SKILL_MARKER}
 # Traceback emulator selection

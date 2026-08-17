@@ -22,6 +22,15 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
     api.setBaseUrl(envApiUrl);
   }
 
+  // Auto-populate active workspace from stored CLI configuration
+  try {
+    const config = await ctx?.infra.config.loadGlobalConfig();
+    if (config?.workspaceId) {
+      activeWorkspaceId = config.workspaceId;
+      activeWorkspaceName = config.workspaceId;
+    }
+  } catch {}
+
   // ── Workspace tools ──────────────────────────────────────
 
   server.tool('list_workspaces', 'List all workspaces the user has access to', {}, async () => {
@@ -30,13 +39,16 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
         content: [{ type: 'text', text: 'Not authenticated. Run `traceback auth login` first.' }],
       };
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
-      const res = await api.get<any[]>('/api/v1/workspaces');
-      const workspaces = res.data;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
-      const lines = workspaces.map((w: any) => `• ${w.name} (${w.id})`).join('\n');
+      const res = await api.get<any>('/api/v1/workspaces');
+      const workspaces = Array.isArray(res.data) ? res.data : res.data?.data || [];
+      const lines = workspaces
+        .map((w: any) => {
+          const id = w.workspace_id || w.id || w.slug;
+          const name = w.name || w.workspace_name || id;
+          return `• ${name} (${id})`;
+        })
+        .join('\n');
       return { content: [{ type: 'text', text: lines || 'No workspaces found.' }] };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
     } catch (err: any) {
       return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
     }
@@ -228,6 +240,7 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 
       const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
       const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
+      const { ensureAppiumServer } = await import('../../infrastructure/mobile/appium.server.js');
       const { connectAppiumTunnel } = await import(
         '../../infrastructure/tunnel/appium-proxy/appium-tunnel.client.js'
       );
@@ -257,8 +270,11 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 
       let bridge: any = null;
       let appiumTunnel: any = null;
+      let appiumServer: Awaited<ReturnType<typeof ensureAppiumServer>> | null = null;
 
       try {
+        appiumServer = await ensureAppiumServer('http://localhost:4723');
+
         bridge = await startAppiumBridge({
           apiBaseUrl,
           authToken: token,
@@ -340,8 +356,19 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
           content: [{ type: 'text', text: `Error during mobile execution: ${err.message}` }],
         };
       } finally {
-        if (bridge) await bridge.close().catch(() => {});
-        if (appiumTunnel) await appiumTunnel.close().catch(() => {});
+        if (bridge) {
+          try {
+            await bridge.close();
+          } catch {}
+        }
+        if (appiumTunnel) {
+          try {
+            appiumTunnel.close();
+          } catch {}
+        }
+        if (appiumServer?.spawned) {
+          await appiumServer.stop().catch(() => {});
+        }
       }
     },
   );

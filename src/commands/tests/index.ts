@@ -370,17 +370,35 @@ async function handleMobileTest(
   const device = devices.find((d) => d.id === deviceId);
   if (!device) return;
 
+  // Step 0: Ensure a local Appium server is running (start one if not).
+  const { ensureAppiumServer } = await import('../../infrastructure/mobile/appium.server.js');
+  const { DEFAULT_APPIUM_URL } = await import('../mobile/verify.js');
+
+  const serverSpinner = ctx.infra.ui.spinner('Starting Appium...');
+  let appiumServer;
+  try {
+    appiumServer = await ensureAppiumServer(DEFAULT_APPIUM_URL);
+    serverSpinner.succeed(appiumServer.spawned ? 'Appium started' : 'Appium already running');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- generic startup error shape
+  } catch (error: any) {
+    serverSpinner.fail(error.message);
+    return;
+  }
+
   // Step 1: Start Appium bridge — creates Appium session + Socket.IO connection
   // The bridge attaches to whatever app is currently open on the device.
   const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
 
   const bridgeSpinner = ctx.infra.ui.spinner(`Connecting to ${device.name} via Appium...`);
   let bridge;
+  let appiumTunnel;
+  let token;
+  let config;
   try {
-    const token = await ctx.infra.auth.getToken();
+    token = await ctx.infra.auth.getToken();
     if (!token) throw new Error('Not authenticated');
 
-    const config = await ctx.infra.config.loadGlobalConfig();
+    config = await ctx.infra.config.loadGlobalConfig();
     bridge = await startAppiumBridge({
       apiBaseUrl: config.apiUrl,
       authToken: token.accessToken,
@@ -388,16 +406,41 @@ async function handleMobileTest(
       platform: device.platform,
       deviceName: device.name,
     });
-    bridgeSpinner.succeed(
-      `Connected to ${device.name} (session: ${bridge.sessionId.slice(0, 12)}...)`,
-    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
   } catch (error: any) {
     bridgeSpinner.fail(`Failed to connect: ${error.message}`);
-    ctx.infra.ui.hint('Make sure Appium is running: `appium`');
-    ctx.infra.ui.hint('Missing Appium or a driver? Run `traceback setup`.');
+    ctx.infra.ui.hint('Missing an Appium driver? Run `traceback setup`.');
+    await appiumServer.stop();
     return;
   }
+
+  // Step 1.5: Also open the generic Appium HTTP tunnel, workspace-scoped (not
+  // session-scoped like the bridge above). This holds a line open that lets any
+  // raw Appium/WebDriver call reach this device's local Appium server via
+  // POST /api/v1/workspaces/{workspaceId}/appium-tunnel/proxy/... — additive to
+  // the structured bridge above, not a replacement for it. Separate try/catch so
+  // a tunnel failure closes the already-open bridge instead of leaking a live
+  // Appium session on the device.
+  try {
+    const { connectAppiumTunnel } = await import(
+      '../../infrastructure/tunnel/appium-proxy/appium-tunnel.client.js'
+    );
+    appiumTunnel = await connectAppiumTunnel({
+      apiBaseUrl: config.apiUrl,
+      authToken: token.accessToken,
+      workspaceId,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
+  } catch (error: any) {
+    bridgeSpinner.fail(`Failed to open Appium tunnel: ${error.message}`);
+    await bridge.close();
+    await appiumServer.stop();
+    return;
+  }
+
+  bridgeSpinner.succeed(
+    `Connected to ${device.name} (session: ${bridge.sessionId.slice(0, 12)}...)`,
+  );
 
   // Step 2: Dispatch the test run with the session_id.
   // The backend's mobile agent will send commands via Socket.IO,
@@ -429,9 +472,15 @@ async function handleMobileTest(
     runSpinner.fail('Failed to start mobile run');
     throw error;
   } finally {
-    // Clean up Appium session and Socket.IO connection
+    // Clean up Appium session, Socket.IO connection, the HTTP tunnel, and (if we
+    // started it) the Appium server itself.
     await bridge.close();
+    appiumTunnel?.close();
     ctx.infra.ui.info('Appium session closed.');
+    if (appiumServer.spawned) {
+      await appiumServer.stop();
+      ctx.infra.ui.info('Appium server stopped.');
+    }
   }
 }
 
