@@ -5,16 +5,22 @@
  *   1. An explicit device id (`--udid` / `--device`) always wins — even when we can't
  *      detect it (adb/simctl missing, device not booted yet), the user gets to override
  *      our blindness rather than being blocked by it.
- *   2. Exactly one detected device for the platform → auto-select it.
- *   3. Several → prompt the user to pick (or fail with the list in non-interactive
- *      modes like `--json`/`--silent`, where a prompt would hang).
- *   4. None → a clear, platform-specific error instead of an opaque Appium failure.
+ *   2. One or more detected devices for the platform → prompt the user to pick, even when
+ *      there's only one candidate (an explicit confirmation, not an automatic run against
+ *      whatever happens to be booted) — or fail with the list in non-interactive modes like
+ *      `--json`/`--silent`, where a prompt would hang (a lone candidate is used there with no
+ *      one to ask).
+ *   3. None → a clear, platform-specific error instead of an opaque Appium failure.
  *
  * `decideDevice` is the pure, unit-testable core; `resolveVerifyDevice` is the I/O
  * wrapper (device detection + optional interactive prompt).
  */
 
-import { detectDevices, type MobileDevice } from './device.detector.js';
+import {
+  detectDevices,
+  type DeviceDetectionDiagnostics,
+  type MobileDevice,
+} from './device.detector.js';
 import type { UIService } from '../ui/ui.types.js';
 
 export type DeviceChoice =
@@ -34,9 +40,30 @@ export interface ResolveVerifyDeviceOptions {
   ui: Pick<UIService, 'info' | 'warn' | 'error'>;
 }
 
-function noneReason(platform: 'android' | 'ios', flagName: string): string {
+/** Distinguishes "the detector couldn't even find/run `adb`/`xcrun`" (most often a stale
+ * terminal's PATH not having picked up a just-installed Android Studio/Xcode) from "it ran
+ * fine, nothing's just booted" — those need different fixes, so they get different messages. */
+function noneReason(
+  platform: 'android' | 'ios',
+  flagName: string,
+  diagnostics: DeviceDetectionDiagnostics,
+): string {
+  if (platform === 'android' && !diagnostics.androidToolFound) {
+    return (
+      "Couldn't find `adb` on your PATH. If you just installed Android Studio, open a new " +
+      `terminal (PATH changes don't apply to one already open) — or pass ${flagName} <id> to target a device anyway.`
+    );
+  }
+  if (platform === 'ios' && !diagnostics.iosToolFound) {
+    return diagnostics.iosNeedsXcodeSelect
+      ? 'Xcode is installed, but `xcode-select` still points at the bare Command Line Tools, ' +
+          "which can't see the Simulator. Fix it with: " +
+          `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer — or pass ${flagName} <device-id> to target one anyway.`
+      : `Couldn't run \`xcrun\` — is Xcode or the Command Line Tools installed? Install them with ` +
+          `\`xcode-select --install\`, or pass ${flagName} <device-id> to target one anyway.`;
+  }
   return platform === 'android'
-    ? `No Android devices found. Start an emulator or plug in a device, and make sure \`adb\` is on your PATH — or pass ${flagName} <id> to target one anyway.`
+    ? `No Android devices found. Start an emulator or plug in a device — or pass ${flagName} <id> to target one anyway.`
     : `No booted iOS Simulator found. Open one (e.g. \`open -a Simulator\`), then retry — or pass ${flagName} <device-id> to target one anyway.`;
 }
 
@@ -46,6 +73,7 @@ export function decideDevice(
   explicitId: string | undefined,
   platform: 'android' | 'ios',
   flagName: '--udid' | '--device',
+  diagnostics: DeviceDetectionDiagnostics,
 ): DeviceChoice {
   if (explicitId) {
     const match = candidates.find((d) => d.id === explicitId || d.name === explicitId);
@@ -57,7 +85,7 @@ export function decideDevice(
     };
   }
   if (candidates.length === 0) {
-    return { kind: 'none', reason: noneReason(platform, flagName) };
+    return { kind: 'none', reason: noneReason(platform, flagName, diagnostics) };
   }
   if (candidates.length === 1) {
     return { kind: 'auto', device: candidates[0]! };
@@ -69,8 +97,15 @@ export function decideDevice(
 export async function resolveVerifyDevice(
   opts: ResolveVerifyDeviceOptions,
 ): Promise<MobileDevice | null> {
-  const candidates = detectDevices().filter((d) => d.platform === opts.platform);
-  const choice = decideDevice(candidates, opts.explicitId, opts.platform, opts.flagName);
+  const { devices, diagnostics } = detectDevices();
+  const candidates = devices.filter((d) => d.platform === opts.platform);
+  const choice = decideDevice(
+    candidates,
+    opts.explicitId,
+    opts.platform,
+    opts.flagName,
+    diagnostics,
+  );
 
   switch (choice.kind) {
     case 'explicit':
@@ -80,9 +115,22 @@ export async function resolveVerifyDevice(
         );
       }
       return choice.device;
-    case 'auto':
-      opts.ui.info(`Running against: ${choice.device.name} (${choice.device.id})`);
-      return choice.device;
+    case 'auto': {
+      // A single detected device still isn't picked silently in interactive mode — an explicit
+      // confirmation, not an automatic run, since starting against the wrong device (a stale
+      // emulator, a colleague's real phone) is much more surprising to undo than one keypress.
+      // Non-interactive (`--json`/`--silent`/CI) has no one to prompt, so it keeps using the
+      // sole candidate and just says so.
+      if (!opts.interactive) {
+        opts.ui.info(`Running against: ${choice.device.name} (${choice.device.id})`);
+        return choice.device;
+      }
+      const { select } = await import('@inquirer/prompts');
+      return await select<MobileDevice>({
+        message: 'Select the device to run the test against:',
+        choices: [{ name: `${choice.device.name} (${choice.device.id})`, value: choice.device }],
+      });
+    }
     case 'none':
       opts.ui.error(choice.reason);
       return null;

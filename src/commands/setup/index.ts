@@ -17,6 +17,11 @@
  *     auto-installed. These are multi-gigabyte, often-interactive installs (Android Studio,
  *     Xcode from the App Store) — the responsible move is pointing at the real installer, not
  *     silently kicking one off.
+ *   - WebDriverAgent (iOS only): pre-built here via a real `xcodebuild build-for-testing` — see
+ *     wda-prebuild.ts for why. Unlike the installs above this is a build, not a package fetch,
+ *     so it's best-effort: Xcode/signing quirks can make it fail on a given machine in ways
+ *     `npm install` never does, and a failure here just leaves the first real iOS run to build
+ *     it instead (the pre-existing behavior, not a regression).
  */
 
 import type { Command } from 'commander';
@@ -26,6 +31,12 @@ import path from 'node:path';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { UIService } from '../../infrastructure/ui/ui.types.js';
 import { getDataDir } from '../../platform/paths.js';
+import { xcodeAppInstalled } from '../../infrastructure/mobile/device.detector.js';
+import {
+  wdaDerivedDataPath,
+  wdaIsPrebuilt,
+  wdaProjectPath,
+} from '../../infrastructure/mobile/wda-prebuild.js';
 
 type ContextGetter = typeof GetContextFn;
 
@@ -49,8 +60,10 @@ export function registerSetupCommands(program: Command, getContext: ContextGette
       await ensureAppium(ui, options.yes);
       await ensureDrivers(ui, options.yes);
       await ensureFfmpeg(ui, options.yes);
+      checkJava(ui);
       checkAndroidSdk(ui);
       checkXcode(ui);
+      await ensureWdaPrebuilt(ui, options.yes);
 
       ui.info('\nDone. Run `traceback doctor` any time to re-check your setup.');
     });
@@ -256,6 +269,29 @@ async function ensureFfmpeg(ui: UIService, skipConfirm: boolean): Promise<void> 
   printFfmpegPathHint(ui, binDir);
 }
 
+/** Appium's own doctor treats a working JDK as a required (not optional) check for the
+ * uiautomator2 driver — without one, `appium driver install` still succeeds, but a real session
+ * fails later with a much less obvious Java error. Check-only, like adb/Xcode below: which JDK
+ * install is right (brew, apt, Adoptium, ...) varies too much by platform to safely automate. */
+function checkJava(ui: UIService): void {
+  try {
+    const output = execSync('java -version 2>&1', { encoding: 'utf-8', timeout: 5000 }).trim();
+    const version = output.split('\n')[0] || 'java';
+    ui.success(`Java found (${version})`);
+  } catch {
+    ui.warn('Java not found — the Android (uiautomator2) driver needs a JDK to run.');
+    if (process.platform === 'darwin') {
+      ui.hint('Install one with `brew install openjdk@17` (brew prints the PATH/JAVA_HOME');
+      ui.hint('export commands it needs), or grab one from https://adoptium.net.');
+    } else if (process.platform === 'linux') {
+      ui.hint('Install one with your package manager (e.g. `apt install openjdk-17-jdk`),');
+      ui.hint('or grab one from https://adoptium.net.');
+    } else {
+      ui.hint('Install a JDK from https://adoptium.net and make sure `java` is on your PATH.');
+    }
+  }
+}
+
 function checkAndroidSdk(ui: UIService): void {
   if (commandExists('adb')) {
     ui.success('Android platform-tools (adb) found.');
@@ -269,10 +305,117 @@ function checkAndroidSdk(ui: UIService): void {
 function checkXcode(ui: UIService): void {
   if (process.platform !== 'darwin') return; // iOS testing only exists on macOS
   try {
-    execSync('xcrun --version', { stdio: 'pipe', timeout: 5000 });
+    // Not `xcrun --version` — that succeeds even when `xcode-select` points at the bare
+    // Command Line Tools, since xcrun itself resolves fine there; `simctl` (what iOS testing
+    // actually needs) only ships inside full Xcode.app's Developer directory, so checking it
+    // directly is the only way to catch the misconfigured-but-"found" case below.
+    execSync('xcrun simctl list devices', { stdio: 'pipe', timeout: 5000 });
     ui.success('Xcode Command Line Tools found.');
   } catch {
-    ui.warn('Xcode Command Line Tools not found — needed to run tests on iOS simulators.');
-    ui.hint('Install them with `xcode-select --install`.');
+    // Xcode.app already installed but `xcode-select` still points at the bare Command Line
+    // Tools (which don't ship `simctl`) is a different problem than Xcode not being installed
+    // at all — `xcode-select --install` doesn't fix it (it only offers the bare CLT, not a
+    // path change), so that generic hint would send someone with Xcode already installed in
+    // circles.
+    if (xcodeAppInstalled()) {
+      ui.warn(
+        'Xcode is installed, but `xcode-select` still points at the bare Command Line Tools.',
+      );
+      ui.hint('Fix it with: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer');
+    } else {
+      ui.warn('Xcode Command Line Tools not found — needed to run tests on iOS simulators.');
+      ui.hint('Install them with `xcode-select --install`.');
+    }
+  }
+}
+
+/** Picks any available iOS Simulator device to build WebDriverAgent against — the compiled app
+ * bundle this produces isn't destination-specific (see wda-prebuild.ts), so which one gets
+ * picked here doesn't need to match whatever a real run later targets. */
+function pickWdaBuildDestination(): string | null {
+  try {
+    const raw = execSync('xcrun simctl list devices available --json', {
+      encoding: 'utf-8',
+      timeout: 10_000,
+    });
+    const parsed = JSON.parse(raw) as {
+      devices: Record<string, Array<{ udid: string; name: string; isAvailable?: boolean }>>;
+    };
+    for (const runtime of Object.keys(parsed.devices)) {
+      const iphone = parsed.devices[runtime]?.find(
+        (d) => d.name.startsWith('iPhone') && d.isAvailable !== false,
+      );
+      if (iphone) return iphone.udid;
+    }
+  } catch {
+    // Falls through to null below — treated the same as "no simulator available".
+  }
+  return null;
+}
+
+/** Pre-builds WebDriverAgent once here instead of on someone's first real test run — see
+ * appium.bridge.ts's console.log for the incident this exists to prevent (a perfectly healthy,
+ * still-building WDA process getting killed mid-run because a multi-minute compile with nothing
+ * on screen looked indistinguishable from a hang). Best-effort throughout: every failure path
+ * just leaves that first-run cost where it already was, not a regression. */
+async function ensureWdaPrebuilt(ui: UIService, skipConfirm: boolean): Promise<void> {
+  if (process.platform !== 'darwin') return; // iOS testing only exists on macOS
+
+  const projectPath = wdaProjectPath();
+  if (!projectPath) return; // xcuitest driver isn't installed -- nothing to build
+
+  if (wdaIsPrebuilt()) {
+    ui.success('WebDriverAgent already pre-built — iOS runs will skip the first-run compile.');
+    return;
+  }
+
+  try {
+    execSync('xcrun simctl list devices', { stdio: 'pipe', timeout: 5000 });
+  } catch {
+    ui.warn("Skipping WebDriverAgent pre-build — Xcode/Simulator isn't usable yet (see above).");
+    ui.hint('Fix that, then run `traceback setup` again to pre-build it.');
+    return;
+  }
+
+  const udid = pickWdaBuildDestination();
+  if (!udid) {
+    ui.warn('Skipping WebDriverAgent pre-build — no available iOS Simulator device found.');
+    ui.hint(
+      'Create one in Xcode (Window > Devices and Simulators), then run `traceback setup` again.',
+    );
+    return;
+  }
+
+  if (!skipConfirm) {
+    const { confirm } = await import('@inquirer/prompts');
+    const install = await confirm({
+      message:
+        "Pre-build WebDriverAgent now (a few minutes, one-time) so it doesn't stall your first real iOS run?",
+      default: true,
+    });
+    if (!install) {
+      ui.hint('Skipped — the first real iOS run will build it instead (also a few minutes).');
+      return;
+    }
+  }
+
+  ui.info('Building WebDriverAgent via Xcode — this can take a few minutes...');
+  const code = await runStreamed('xcodebuild', [
+    'build-for-testing',
+    '-project',
+    projectPath,
+    '-scheme',
+    'WebDriverAgentRunner',
+    '-derivedDataPath',
+    wdaDerivedDataPath(),
+    '-destination',
+    `id=${udid}`,
+  ]);
+
+  if (code === 0 && wdaIsPrebuilt()) {
+    ui.success('WebDriverAgent pre-built — future iOS runs will skip the first-run compile.');
+  } else {
+    ui.error('WebDriverAgent pre-build failed — see the output above.');
+    ui.hint('iOS runs will fall back to building it on first use instead.');
   }
 }

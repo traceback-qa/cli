@@ -10,9 +10,63 @@
 import type { Command } from 'commander';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { CliContext } from '../../types/context.js';
-import type { MobileDevice } from '../../infrastructure/mobile/device.detector.js';
+import type {
+  MobileDevice,
+  DeviceDetectionDiagnostics,
+} from '../../infrastructure/mobile/device.detector.js';
 
 type ContextGetter = typeof GetContextFn;
+
+/** Prints an accurate warning for "no devices" — distinguishing a genuine "nothing's booted"
+ * from `adb`/`xcrun` being unresolvable at all (most often a stale terminal's PATH not having
+ * picked up a just-installed Android Studio/Xcode), which used to produce the same generic
+ * "start an emulator" message even when one was already running. Shared by both mobile flows
+ * below (saved-test device picker and live-verify) since they hit the exact same gap. */
+function warnNoDevices(ctx: CliContext, diagnostics: DeviceDetectionDiagnostics): void {
+  const { androidToolFound, iosToolFound, iosNeedsXcodeSelect } = diagnostics;
+
+  if (!androidToolFound && !iosToolFound) {
+    ctx.infra.ui.warn("Couldn't find `adb` or `xcrun` — can't check for running devices.");
+    ctx.infra.ui.hint('If you just installed Android Studio or Xcode, open a new terminal');
+    ctx.infra.ui.hint("(PATH changes don't apply to a terminal that was already open).");
+    if (iosNeedsXcodeSelect) {
+      ctx.infra.ui.hint(
+        'Also run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer',
+      );
+    }
+    return;
+  }
+
+  if (!androidToolFound) {
+    ctx.infra.ui.warn("Couldn't find `adb` on your PATH.");
+    ctx.infra.ui.hint('If you just installed Android Studio, open a new terminal (PATH changes');
+    ctx.infra.ui.hint("don't apply to a terminal that was already open) — or add");
+    ctx.infra.ui.hint('$ANDROID_HOME/platform-tools to your PATH yourself.');
+    return;
+  }
+
+  if (!iosToolFound) {
+    if (iosNeedsXcodeSelect) {
+      ctx.infra.ui.warn(
+        'Xcode is installed, but `xcode-select` still points at the bare Command Line Tools,',
+      );
+      ctx.infra.ui.warn("which can't see the Simulator.");
+      ctx.infra.ui.hint(
+        'Fix it with: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer',
+      );
+    } else {
+      ctx.infra.ui.warn("Couldn't run `xcrun` — is Xcode or the Command Line Tools installed?");
+      ctx.infra.ui.hint('Install them with `xcode-select --install`, or open Xcode.');
+    }
+    return;
+  }
+
+  // Both tools resolved fine — genuinely nothing booted.
+  ctx.infra.ui.warn('No running emulators or simulators found.');
+  ctx.infra.ui.hint('Start an Android emulator or iOS simulator and try again.');
+  ctx.infra.ui.hint('  Android: `emulator -avd <name>` or open Android Studio');
+  ctx.infra.ui.hint('  iOS:     `open -a Simulator` or open Xcode');
+}
 
 interface Test {
   id: string;
@@ -347,14 +401,11 @@ async function handleMobileTest(
 
   // Detect running devices/emulators
   const deviceSpinner = ctx.infra.ui.spinner('Scanning for devices...');
-  const devices = detectDevices();
+  const { devices, diagnostics } = detectDevices();
   deviceSpinner.stop();
 
   if (!devices.length) {
-    ctx.infra.ui.warn('No running emulators or simulators found.');
-    ctx.infra.ui.hint('Start an Android emulator or iOS simulator and try again.');
-    ctx.infra.ui.hint('  Android: `emulator -avd <name>` or open Android Studio');
-    ctx.infra.ui.hint('  iOS:     `open -a Simulator` or open Xcode');
+    warnNoDevices(ctx, diagnostics);
     return;
   }
 
@@ -457,30 +508,24 @@ async function handleMobileLiveVerify(ctx: CliContext, workspaceId: string): Pro
 
   // Detect running devices — the chosen device implies the platform
   const deviceSpinner = ctx.infra.ui.spinner('Scanning for devices...');
-  const devices = detectDevices();
+  const { devices, diagnostics } = detectDevices();
   deviceSpinner.stop();
 
   if (!devices.length) {
-    ctx.infra.ui.warn('No running emulators or simulators found.');
-    ctx.infra.ui.hint('Start an Android emulator or iOS simulator and try again.');
-    ctx.infra.ui.hint('  Android: `emulator -avd <name>` or open Android Studio');
-    ctx.infra.ui.hint('  iOS:     `open -a Simulator` or open Xcode');
+    warnNoDevices(ctx, diagnostics);
     return;
   }
 
-  let device: MobileDevice;
-  if (devices.length === 1) {
-    device = devices[0]!;
-    ctx.infra.ui.info(`Running against: ${device.name} (${device.id})`);
-  } else {
-    device = await select<MobileDevice>({
-      message: 'Select a device',
-      choices: devices.map((d) => ({
-        name: `${d.platform === 'ios' ? '🍎' : '🤖'}  ${d.name}  (${d.id.slice(0, 12)}...)`,
-        value: d,
-      })),
-    });
-  }
+  // Always prompt, even with exactly one device detected — an explicit confirmation, not an
+  // automatic pick, since a run started against the wrong device (a stale emulator, a
+  // colleague's real phone) is much more surprising to undo than one extra keypress.
+  const device = await select<MobileDevice>({
+    message: 'Select a device',
+    choices: devices.map((d) => ({
+      name: `${d.platform === 'ios' ? '🍎' : '🤖'}  ${d.name}  (${d.id.slice(0, 12)}...)`,
+      value: d,
+    })),
+  });
 
   await runMobileVerify(ctx, {
     workspaceId,

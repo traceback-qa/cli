@@ -18,6 +18,7 @@ import { io, type Socket } from 'socket.io-client';
 import http from 'http';
 import { spawn, type ChildProcess, execSync } from 'child_process';
 import fs from 'fs/promises';
+import { wdaDerivedDataPath, wdaIsPrebuilt } from './wda-prebuild.js';
 
 export interface AppiumBridgeOptions {
   /** Backend API base URL (e.g. http://localhost:8000/api/v1) */
@@ -59,8 +60,9 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
 
   // Step 1: Create an Appium session that attaches to the current foreground app.
   // We use autoLaunch=false so it doesn't launch a new app — just connects to whatever's open.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Appium capability values are a mixed bag of primitives
-  const capabilities: Record<string, any> =
+  const iosHasPrebuiltWda = opts.platform === 'ios' && wdaIsPrebuilt();
+
+  const capabilities: Record<string, unknown> =
     opts.platform === 'android'
       ? {
           platformName: 'Android',
@@ -77,9 +79,17 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
           'appium:udid': opts.deviceId,
           'appium:autoLaunch': false,
           'appium:noReset': true,
+          // `traceback setup` pre-builds WDA once via a real `xcodebuild build-for-testing`
+          // (see wda-prebuild.ts) specifically to avoid the first-run compile below -- these two
+          // capabilities are Appium's own documented way to reuse that build: the driver runs
+          // `test-without-building` against whichever simulator this session actually targets
+          // instead of recompiling from scratch.
+          ...(iosHasPrebuiltWda
+            ? { 'appium:usePrebuiltWDA': true, 'appium:derivedDataPath': wdaDerivedDataPath() }
+            : {}),
         };
 
-  if (opts.platform === 'ios') {
+  if (opts.platform === 'ios' && !iosHasPrebuiltWda) {
     // The first session against a given simulator has to compile WebDriverAgent via a real
     // `xcodebuild build-for-testing` before Appium's XCUITest driver can do anything -- there's
     // no Android equivalent (UiAutomator2 is a pre-built driver). Without this line, that
@@ -88,12 +98,15 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
     // repeatedly killed because it "looked stuck" (low CPU%, no output) when it was actually
     // working -- destroying its build cache and forcing a full cold rebuild each time. Once WDA
     // is built for a given simulator, Appium detects and reuses the still-running instance, so
-    // every session after the first is fast, same as Android.
+    // every session after the first is fast, same as Android. `traceback setup` now offers to
+    // pre-build WDA up front specifically to avoid this path -- reaching it means that either
+    // wasn't run, was skipped, or failed (see its own output for which).
     // eslint-disable-next-line no-console
     console.log(
       "ℹ First run on this simulator: iOS has to build WebDriverAgent (Appium's driver " +
         'companion app) via Xcode before it can start — this can take a few minutes. Later ' +
-        'runs against the same simulator reuse it and start in seconds.',
+        'runs against the same simulator reuse it and start in seconds. (Run `traceback setup` ' +
+        'to pre-build it up front next time.)',
     );
   }
 

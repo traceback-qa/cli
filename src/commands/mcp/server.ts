@@ -16,6 +16,16 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 
   const api = ctx?.infra.api;
 
+  // Pre-load active workspace from global config if configured
+  if (ctx?.infra.config) {
+    try {
+      const config = await ctx.infra.config.loadGlobalConfig();
+      if (config.workspaceId) {
+        activeWorkspaceId = config.workspaceId;
+      }
+    } catch {}
+  }
+
   // Allow env override for MCP (e.g. when testing locally)
   const envApiUrl = process.env.TRACEBACK_API_URL;
   if (envApiUrl && api) {
@@ -33,8 +43,13 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
       const res = await api.get<any[]>('/api/v1/workspaces');
       const workspaces = res.data;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace list shape not modeled client-side
-      const lines = workspaces.map((w: any) => `• ${w.name} (${w.id})`).join('\n');
+      const lines = workspaces
+        .map((w: Record<string, unknown>) => {
+          const id = String(w.workspace_id ?? w.id ?? '');
+          const activeMarker = id === activeWorkspaceId ? ' (active)' : '';
+          return `• ${w.name} (${id})${activeMarker}`;
+        })
+        .join('\n');
       return { content: [{ type: 'text', text: lines || 'No workspaces found.' }] };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
     } catch (err: any) {

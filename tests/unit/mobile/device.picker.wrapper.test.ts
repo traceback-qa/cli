@@ -4,7 +4,10 @@
  * errors, the prompt choices) is exercised here.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { MobileDevice } from '../../../src/infrastructure/mobile/device.detector.js';
+import type {
+  DeviceDetectionDiagnostics,
+  MobileDevice,
+} from '../../../src/infrastructure/mobile/device.detector.js';
 
 const { select } = vi.hoisted(() => ({ select: vi.fn() }));
 vi.mock('@inquirer/prompts', () => ({ select }));
@@ -15,6 +18,19 @@ vi.mock('../../../src/infrastructure/mobile/device.detector.js', () => ({
 }));
 
 import { resolveVerifyDevice } from '../../../src/infrastructure/mobile/device.picker.js';
+
+// Both detection tools resolved fine — these tests exercise device *selection*, not the
+// diagnostics-driven "why is nothing detected" messaging (that's covered in
+// device.picker.test.ts's decideDevice unit tests).
+const toolsFound: DeviceDetectionDiagnostics = {
+  androidToolFound: true,
+  iosToolFound: true,
+  iosNeedsXcodeSelect: false,
+};
+/** Wraps a plain device list in the shape `detectDevices()` actually returns. */
+function detected(devices: MobileDevice[]) {
+  return { devices, diagnostics: toolsFound };
+}
 
 const pixel7: MobileDevice = {
   id: 'emulator-5554',
@@ -45,8 +61,9 @@ describe('resolveVerifyDevice', () => {
     select.mockReset();
   });
 
-  it('auto-selects a single detected device and tells the user which one', async () => {
-    detectDevicesMock.mockReturnValue([pixel7]);
+  it('prompts for confirmation even with a single detected device (interactive)', async () => {
+    detectDevicesMock.mockReturnValue(detected([pixel7]));
+    select.mockResolvedValue(pixel7);
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
@@ -57,12 +74,32 @@ describe('resolveVerifyDevice', () => {
     });
 
     expect(device).toEqual(pixel7);
+    expect(select).toHaveBeenCalledWith(
+      expect.objectContaining({
+        choices: [{ name: 'Pixel 7 (emulator-5554)', value: pixel7 }],
+      }),
+    );
+  });
+
+  it('auto-selects a single detected device without prompting when non-interactive', async () => {
+    detectDevicesMock.mockReturnValue(detected([pixel7]));
+    const ui = makeUi();
+
+    const device = await resolveVerifyDevice({
+      platform: 'android',
+      flagName: '--device',
+      interactive: false,
+      ui,
+    });
+
+    expect(device).toEqual(pixel7);
     expect(ui.info).toHaveBeenCalledWith('Running against: Pixel 7 (emulator-5554)');
     expect(select).not.toHaveBeenCalled();
   });
 
   it('only considers devices of the requested platform', async () => {
-    detectDevicesMock.mockReturnValue([pixel7, iphone17]);
+    detectDevicesMock.mockReturnValue(detected([pixel7, iphone17]));
+    select.mockResolvedValue(iphone17);
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
@@ -73,13 +110,15 @@ describe('resolveVerifyDevice', () => {
     });
 
     expect(device).toEqual(iphone17);
-    expect(ui.info).toHaveBeenCalledWith(
-      'Running against: iPhone 17 (A3C3807E-1CE9-4CC0-B7A3-8900B5FD9F0A)',
+    expect(select).toHaveBeenCalledWith(
+      expect.objectContaining({
+        choices: [{ name: 'iPhone 17 (A3C3807E-1CE9-4CC0-B7A3-8900B5FD9F0A)', value: iphone17 }],
+      }),
     );
   });
 
   it('fails with guidance when no devices are detected', async () => {
-    detectDevicesMock.mockReturnValue([]);
+    detectDevicesMock.mockReturnValue(detected([]));
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
@@ -95,7 +134,7 @@ describe('resolveVerifyDevice', () => {
   });
 
   it('fails with the device list when multiple devices and non-interactive', async () => {
-    detectDevicesMock.mockReturnValue([pixel7, pixel6]);
+    detectDevicesMock.mockReturnValue(detected([pixel7, pixel6]));
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
@@ -115,7 +154,7 @@ describe('resolveVerifyDevice', () => {
   });
 
   it('prompts for a pick when multiple devices and interactive', async () => {
-    detectDevicesMock.mockReturnValue([pixel7, pixel6]);
+    detectDevicesMock.mockReturnValue(detected([pixel7, pixel6]));
     select.mockResolvedValue(pixel6);
     const ui = makeUi();
 
@@ -139,7 +178,7 @@ describe('resolveVerifyDevice', () => {
   });
 
   it('an explicit id short-circuits detection and never prompts', async () => {
-    detectDevicesMock.mockReturnValue([pixel7, pixel6]);
+    detectDevicesMock.mockReturnValue(detected([pixel7, pixel6]));
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
@@ -156,7 +195,7 @@ describe('resolveVerifyDevice', () => {
   });
 
   it('warns when an explicit id is not among detected devices but still uses it', async () => {
-    detectDevicesMock.mockReturnValue([pixel7]);
+    detectDevicesMock.mockReturnValue(detected([pixel7]));
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
@@ -172,7 +211,7 @@ describe('resolveVerifyDevice', () => {
   });
 
   it('uses an explicit id even when detection found nothing (no warning)', async () => {
-    detectDevicesMock.mockReturnValue([]);
+    detectDevicesMock.mockReturnValue(detected([]));
     const ui = makeUi();
 
     const device = await resolveVerifyDevice({
