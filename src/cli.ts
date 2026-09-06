@@ -8,7 +8,6 @@ import {
   registerWorkspaceCommands,
   registerTestCommands,
   registerProjectCommands,
-  registerAgentCommands,
   registerConfigCommands,
   registerDoctorCommands,
   registerUpdateCommands,
@@ -58,7 +57,6 @@ async function main(): Promise<void> {
   registerWorkspaceCommands(program, getContext);
   registerTestCommands(program, getContext);
   registerProjectCommands(program, getContext);
-  registerAgentCommands(program, getContext);
   registerConfigCommands(program, getContext);
   registerDoctorCommands(program, getContext);
   registerUpdateCommands(program, getContext);

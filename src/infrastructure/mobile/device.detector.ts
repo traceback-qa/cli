@@ -161,6 +161,14 @@ export function xcodeAppInstalled(): boolean {
  *   -- iOS 17.5 --
  *       iPhone 15 Pro (ABCD-1234-...) (Booted)
  */
+function getXcodeDeveloperDir(): string | undefined {
+  if (process.env.DEVELOPER_DIR) return process.env.DEVELOPER_DIR;
+  if (fs.existsSync('/Applications/Xcode.app/Contents/Developer')) {
+    return '/Applications/Xcode.app/Contents/Developer';
+  }
+  return undefined;
+}
+
 function detectIOSSimulators(): {
   devices: MobileDevice[];
   toolFound: boolean;
@@ -171,10 +179,13 @@ function detectIOSSimulators(): {
     return { devices: [], toolFound: true, needsXcodeSelect: false };
 
   try {
+    const devDir = getXcodeDeveloperDir();
+    const env = devDir ? { ...process.env, DEVELOPER_DIR: devDir } : process.env;
     const output = execSync('xcrun simctl list devices booted', {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'ignore'],
+      env,
     });
 
     const devices: MobileDevice[] = [];

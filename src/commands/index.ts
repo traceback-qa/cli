@@ -2,7 +2,6 @@ export { registerAuthCommands } from './auth/index.js';
 export { registerWorkspaceCommands } from './workspace/index.js';
 export { registerTestCommands } from './tests/index.js';
 export { registerProjectCommands } from './project/index.js';
-export { registerAgentCommands } from './agent/index.js';
 export { registerConfigCommands } from './config/index.js';
 export { registerDoctorCommands } from './doctor/index.js';
 export { registerUpdateCommands } from './update/index.js';

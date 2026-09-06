@@ -29,7 +29,7 @@ Use the Traceback CLI for goal-based mobile verification against a running Andro
 
 1. Run traceback setup once to install Appium and the platform drivers.
 2. Run traceback tests and choose Mobile tests.
-3. Choose Pre-made test for a saved workspace test, or Live verify for a new natural-language goal.
+3. Enter the natural-language goal to verify.
 4. Select the detected emulator or simulator when more than one is running.
 5. Keep the goal observable and specific: name the screen, interaction, or state to verify.
 

@@ -109,27 +109,10 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
         ],
       });
 
-      // Step 1.5 (mobile only): pre-made test, or a live verify against a device
+      // Step 1.5 (mobile only): live verify against a device
       if (platform === 'mobile') {
-        const mode = await select({
-          message: 'How do you want to run the mobile test?',
-          choices: [
-            {
-              name: '📋  Pre-made test',
-              value: 'premade',
-              description: 'Pick a saved test from your workspace',
-            },
-            {
-              name: '🎯  Live verify',
-              value: 'live',
-              description: 'Describe what to verify, pick a device, and run it now',
-            },
-          ],
-        });
-        if (mode === 'live') {
-          await handleMobileLiveVerify(ctx, workspaceId);
-          return;
-        }
+        await handleMobileLiveVerify(ctx, workspaceId);
+        return;
       }
 
       // Step 2: Fetch tests from the backend
@@ -172,33 +155,28 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
       if (!selected) return;
 
       // Step 4: Run the selected test
-      if (platform === 'mobile') {
-        // ── Mobile: detect devices, let user pick one ──
-        await handleMobileTest(ctx, workspaceId, testId, selected);
-      } else {
-        // ── Web: environment (if applicable), then straight into a cloud run --
-        // no cloud/local/details menu in between. `runInCloud` itself asks "Watch this run
-        // live?" and streams events when the answer is yes. Local Chrome (CDP tunnel) and the
-        // static details view still exist (`runLocally`/`showDetails` below) for whatever picks
-        // them back up later -- they're just not reachable from this flow anymore.
-        const envs = Object.keys(selected.environments || {});
-        // A single-choice select prompt has nothing to actually decide -- it just makes the
-        // user press Enter through a list with one item in it, which reads as "did this even
-        // ask me anything?" rather than a real environment choice. Only prompt when there's
-        // more than one to pick between; with exactly one, use it directly and say so.
-        let environment = envs[0] || 'production';
-        if (envs.length > 1) {
-          environment = await select({
-            message: 'Select an environment',
-            choices: envs.map((e) => ({ name: e, value: e })),
-            default: envs.includes('production') ? 'production' : envs[0],
-          });
-        } else if (envs.length === 1) {
-          ctx.infra.ui.hint(`Environment: ${environment}`);
-        }
-
-        await runInCloud(ctx, workspaceId, testId, selected.name, environment);
+      // ── Web: environment (if applicable), then straight into a cloud run --
+      // no cloud/local/details menu in between. `runInCloud` itself asks "Watch this run
+      // live?" and streams events when the answer is yes. Local Chrome (CDP tunnel) and the
+      // static details view still exist (`runLocally`/`showDetails` below) for whatever picks
+      // them back up later -- they're just not reachable from this flow anymore.
+      const envs = Object.keys(selected.environments || {});
+      // A single-choice select prompt has nothing to actually decide -- it just makes the
+      // user press Enter through a list with one item in it, which reads as "did this even
+      // ask me anything?" rather than a real environment choice. Only prompt when there's
+      // more than one to pick between; with exactly one, use it directly and say so.
+      let environment = envs[0] || 'production';
+      if (envs.length > 1) {
+        environment = await select({
+          message: 'Select an environment',
+          choices: envs.map((e) => ({ name: e, value: e })),
+          default: envs.includes('production') ? 'production' : envs[0],
+        });
+      } else if (envs.length === 1) {
+        ctx.infra.ui.hint(`Environment: ${environment}`);
       }
+
+      await runInCloud(ctx, workspaceId, testId, selected.name, environment);
     });
 }
 
@@ -371,7 +349,7 @@ function showDetails(ctx: CliContext, test: Test): void {
  *   2. Show the list for user to select
  *   3. Dispatch the run with the selected device info
  */
-async function handleMobileTest(
+export async function handleMobileTest(
   ctx: CliContext,
   workspaceId: string,
   testId: string,

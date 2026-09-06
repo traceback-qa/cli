@@ -118,18 +118,13 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 
       // Normalize bare URLs — agents often omit the scheme (e.g. "localhost:3000")
       const normalizedUrl = /^https?:\/\//i.test(url) ? url : `http://${url}`;
-      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)/i.test(
-        normalizedUrl,
-      );
       let tunnelId: string | undefined;
       let cleanup: (() => Promise<void>) | undefined;
 
       try {
-        if (isLocalhost) {
-          const tunnel = await launchTunnel(ctx);
-          tunnelId = tunnel.tunnelId;
-          cleanup = tunnel.cleanup;
-        }
+        const tunnel = await launchTunnel(ctx);
+        tunnelId = tunnel.tunnelId;
+        cleanup = tunnel.cleanup;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- verify-implementation response shape not modeled client-side
         const res = await api.post<any>(
@@ -168,6 +163,121 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } finally {
         if (cleanup) await cleanup();
+      }
+    },
+  );
+
+  server.tool(
+    'verify_mobile_implementation',
+    'Verify a mobile app implementation against a specific natural language goal on a connected iOS simulator or Android emulator.',
+    {
+      goal: z
+        .string()
+        .min(1)
+        .describe('The natural language goal or criteria to verify on the mobile device'),
+      platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe('Mobile platform (ios or android). Auto-detected if omitted.'),
+      app_identifier: z
+        .string()
+        .optional()
+        .describe('App bundle ID (iOS) or package name (Android), e.g. com.example.app'),
+    },
+    async ({ goal, platform, app_identifier }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+      const { devices } = detectDevices();
+      if (!devices.length) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No running iOS simulator or Android emulator found. Please start a simulator (e.g. `open -a Simulator`) or emulator first.',
+            },
+          ],
+        };
+      }
+
+      const selectedDevice = platform
+        ? devices.find((d) => d.platform === platform) || devices[0]
+        : devices[0];
+      if (!selectedDevice) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No running iOS simulator or Android emulator found.',
+            },
+          ],
+        };
+      }
+      const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
+      const token = ctx ? await ctx.infra.auth.getToken() : null;
+      if (!token?.accessToken) {
+        return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      }
+
+      const config = ctx?.infra.config
+        ? await ctx.infra.config.loadGlobalConfig()
+        : { apiUrl: 'http://localhost:8000' };
+      let bridge;
+      try {
+        bridge = await startAppiumBridge({
+          apiBaseUrl: config.apiUrl,
+          authToken: token.accessToken,
+          deviceId: selectedDevice.id,
+          platform: selectedDevice.platform,
+          deviceName: selectedDevice.name,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Failed to connect to mobile device via Appium: ${message}`,
+            },
+          ],
+        };
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mobile-start response shape
+        const res = await api.post<any>(
+          `/api/v1/workspaces/${activeWorkspaceId}/mcp/mobile-start`,
+          {
+            goal,
+            platform: selectedDevice.platform,
+            trigger_type: 'MCP',
+            device_name: selectedDevice.name,
+            session_id: bridge.sessionId,
+            app_identifier,
+          },
+          { timeout: 300_000 },
+        );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Mobile verification run initiated (ID: ${res.data?.run_id}). Target: ${selectedDevice.name} (${selectedDevice.platform.toUpperCase()}). Goal: "${goal}"`,
+            },
+          ],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error starting mobile verification: ${message}` }],
+        };
+      } finally {
+        if (bridge) await bridge.close();
       }
     },
   );
@@ -287,25 +397,49 @@ async function launchTunnel(
   const { spawn } = await import('child_process');
   const { WebSocket } = await import('ws');
 
-  // Find Chrome
-  const chromePath = findChrome();
-  if (!chromePath)
-    throw new Error('Chrome not found. Install Google Chrome to use localhost verification.');
+  // Check if Chrome is already running on port 9222
+  let alreadyRunning = false;
+  try {
+    const res = await fetch('http://127.0.0.1:9222/json/version');
+    if (res.ok) alreadyRunning = true;
+  } catch {}
 
-  // Launch Chrome with CDP
-  const chromeProc = spawn(
-    chromePath,
-    [
-      '--remote-debugging-port=9222',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--user-data-dir=/tmp/traceback-chrome-profile',
-      'about:blank',
-    ],
-    { stdio: 'ignore', detached: true },
-  );
+  if (!alreadyRunning) {
+    const chromePath = findChrome();
+    if (!chromePath)
+      throw new Error('Chrome not found. Install Google Chrome to use verification.');
 
-  await new Promise((r) => setTimeout(r, 2000));
+    // Launch Chrome with CDP
+    if (process.platform === 'darwin') {
+      execSync(
+        'open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/tmp/traceback-chrome-profile --no-first-run --no-default-browser-check about:blank',
+      );
+      try {
+        execSync(
+          'osascript -e \'tell application "Google Chrome" to activate\' -e \'tell application "System Events" to set frontmost of process "Google Chrome" to true\'',
+        );
+      } catch {}
+    } else {
+      spawn(
+        chromePath,
+        [
+          '--remote-debugging-port=9222',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--user-data-dir=/tmp/traceback-chrome-profile',
+          'about:blank',
+        ],
+        { stdio: 'ignore', detached: true },
+      );
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  } else if (process.platform === 'darwin') {
+    try {
+      execSync(
+        'osascript -e \'tell application "Google Chrome" to activate\' -e \'tell application "System Events" to set frontmost of process "Google Chrome" to true\'',
+      );
+    } catch {}
+  }
 
   // Connect tunnel
   const baseUrl = ctx?.infra.api.getAxiosInstance().defaults.baseURL || 'http://localhost:8000';
@@ -318,12 +452,13 @@ async function launchTunnel(
   const ws = new WebSocket(wsUrl);
 
   const tunnelId = await new Promise<string>((resolve, reject) => {
+    let pendingTunnelId = '';
     const timeout = setTimeout(() => reject(new Error('Tunnel connection timeout')), 10000);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ws message payload shape not modeled client-side
     ws.on('message', async (raw: any) => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === 'ready') {
-        clearTimeout(timeout);
+        pendingTunnelId = msg.tunnel_id;
         try {
           // Keep trying to fetch the CDP URL until Chrome is ready
           let cdpUrl = '';
@@ -344,10 +479,13 @@ async function launchTunnel(
           }
           if (!cdpUrl) throw new Error('Could not get CDP URL from Chrome');
           ws.send(JSON.stringify({ type: 'cdp_ready', cdp_url: cdpUrl }));
-          resolve(msg.tunnel_id);
         } catch (err) {
+          clearTimeout(timeout);
           reject(err);
         }
+      } else if (msg.type === 'cdp_ack') {
+        clearTimeout(timeout);
+        resolve(pendingTunnelId);
       }
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ws error shape not modeled client-side
@@ -360,9 +498,6 @@ async function launchTunnel(
   const cleanup = async () => {
     try {
       ws.close();
-    } catch {}
-    try {
-      chromeProc.kill();
     } catch {}
   };
 

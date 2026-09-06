@@ -115,33 +115,37 @@ export interface LaunchedChrome {
  * Uses a temporary user-data-dir so it doesn't conflict with any
  * existing Chrome session the user might have open.
  */
-export async function launchChrome(port: number = CDP_PORT): Promise<LaunchedChrome> {
+export interface LaunchChromeOptions {
+  port?: number;
+  headed?: boolean;
+}
+
+export async function launchChrome(
+  optionsOrPort: LaunchChromeOptions | number = CDP_PORT,
+): Promise<LaunchedChrome> {
+  const port = typeof optionsOrPort === 'number' ? optionsOrPort : (optionsOrPort.port ?? CDP_PORT);
+
   const chromePath = findChrome();
   if (!chromePath) {
     throw new Error('Chrome not found. Install Google Chrome and try again.');
   }
 
-  // Use a temp profile so we don't interfere with the user's normal Chrome.
-  // This also avoids the "Chrome is already running" problem — a separate
-  // user-data-dir means a separate Chrome instance.
   const tempProfile = join(tmpdir(), `traceback-chrome-${Date.now()}`);
 
-  const chromeProcess = spawn(
-    chromePath,
-    [
-      `--remote-debugging-port=${port}`,
-      `--user-data-dir=${tempProfile}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--no-startup-window',
-      '--window-size=1920,1080',
-      '--window-position=0,0',
-    ],
-    {
-      stdio: 'ignore',
-      detached: false,
-    },
-  );
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${tempProfile}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--no-startup-window',
+    '--window-size=1920,1080',
+    '--window-position=0,0',
+  ];
+
+  const chromeProcess = spawn(chromePath, args, {
+    stdio: 'ignore',
+    detached: false,
+  });
 
   // If Chrome crashes immediately, catch it
   chromeProcess.on('error', (err) => {
