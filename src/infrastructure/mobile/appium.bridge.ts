@@ -19,6 +19,7 @@ import http from 'http';
 import { spawn, type ChildProcess, execSync } from 'child_process';
 import fs from 'fs/promises';
 import { wdaDerivedDataPath, wdaIsPrebuilt } from './wda-prebuild.js';
+import { ensureAppiumServer } from './appium.server.js';
 
 export interface AppiumBridgeOptions {
   /** Backend API base URL (e.g. http://localhost:8000/api/v1) */
@@ -58,394 +59,416 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
   let recordingProcess: ChildProcess | null = null;
   const recordingPath = `/tmp/traceback_recording_${opts.deviceId}.mp4`;
 
-  // Step 1: Create an Appium session that attaches to the current foreground app.
-  // We use autoLaunch=false so it doesn't launch a new app — just connects to whatever's open.
-  const iosHasPrebuiltWda = opts.platform === 'ios' && wdaIsPrebuilt();
+  // Step 0: Ensure Appium server is running (auto-starts if needed)
+  const serverHandle = await ensureAppiumServer({ appiumUrl });
 
-  const capabilities: Record<string, unknown> =
-    opts.platform === 'android'
-      ? {
-          platformName: 'Android',
-          'appium:automationName': 'UiAutomator2',
-          'appium:udid': opts.deviceId,
-          'appium:autoLaunch': false,
-          'appium:noReset': true,
-          // Attach to the current foreground app
-          'appium:autoGrantPermissions': true,
-        }
-      : {
-          platformName: 'iOS',
-          'appium:automationName': 'XCUITest',
-          'appium:udid': opts.deviceId,
-          'appium:autoLaunch': false,
-          'appium:noReset': true,
-          // `traceback setup` pre-builds WDA once via a real `xcodebuild build-for-testing`
-          // (see wda-prebuild.ts) specifically to avoid the first-run compile below -- these two
-          // capabilities are Appium's own documented way to reuse that build: the driver runs
-          // `test-without-building` against whichever simulator this session actually targets
-          // instead of recompiling from scratch.
-          ...(iosHasPrebuiltWda
-            ? { 'appium:usePrebuiltWDA': true, 'appium:derivedDataPath': wdaDerivedDataPath() }
-            : {}),
-        };
+  try {
+    // Step 1: Create an Appium session that attaches to the current foreground app.
+    // We use autoLaunch=false so it doesn't launch a new app — just connects to whatever's open.
+    const iosHasPrebuiltWda = opts.platform === 'ios' && wdaIsPrebuilt();
 
-  if (opts.platform === 'ios' && !iosHasPrebuiltWda) {
-    // The first session against a given simulator has to compile WebDriverAgent via a real
-    // `xcodebuild build-for-testing` before Appium's XCUITest driver can do anything -- there's
-    // no Android equivalent (UiAutomator2 is a pre-built driver). Without this line, that
-    // multi-minute one-time cost looks indistinguishable from a hang: this exact confusion led
-    // to a real incident (2026-08-12) where a perfectly healthy, still-building WDA process was
-    // repeatedly killed because it "looked stuck" (low CPU%, no output) when it was actually
-    // working -- destroying its build cache and forcing a full cold rebuild each time. Once WDA
-    // is built for a given simulator, Appium detects and reuses the still-running instance, so
-    // every session after the first is fast, same as Android. `traceback setup` now offers to
-    // pre-build WDA up front specifically to avoid this path -- reaching it means that either
-    // wasn't run, was skipped, or failed (see its own output for which).
-    // eslint-disable-next-line no-console
-    console.log(
-      "ℹ First run on this simulator: iOS has to build WebDriverAgent (Appium's driver " +
-        'companion app) via Xcode before it can start — this can take a few minutes. Later ' +
-        'runs against the same simulator reuse it and start in seconds. (Run `traceback setup` ' +
-        'to pre-build it up front next time.)',
-    );
-  }
-
-  const sessionRes = await fetchJson(
-    `${appiumUrl}/session`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        capabilities: { alwaysMatch: capabilities },
-      }),
-    },
-    0,
-    APPIUM_SESSION_CREATE_TIMEOUT_MS[opts.platform],
-  );
-
-  const appiumSessionId = sessionRes?.value?.sessionId;
-  if (!appiumSessionId) {
-    throw new Error(
-      'Failed to create Appium session — is Appium running and the device connected?',
-    );
-  }
-
-  // Step 2: Connect to the backend via Socket.IO
-  const socketUrl = opts.apiBaseUrl.replace(/\/api\/v1$/, '');
-  const socket: Socket = io(socketUrl, {
-    path: '/socket.io',
-    transports: ['websocket'],
-    auth: { token: opts.authToken },
-    query: { token: opts.authToken },
-    // Keep the connection alive — mobile runs can take minutes.
-    // Without these, Socket.IO drops the connection after ~25s idle.
-    reconnection: true,
-    reconnectionAttempts: 10,
-    reconnectionDelay: 1000,
-    timeout: 30_000,
-  });
-
-  // Reconnects (Socket.IO auto-reconnect after a network blip) re-fire 'connect' and re-run
-  // this handshake. Tracking the session id here and sending it back as `sessionId` on every
-  // `cli_auth` -- not just the first -- lets the backend rebind the SAME session onto the new
-  // socket (see `mobile_bridge.register`'s `resume_session_id`) instead of minting a new one
-  // that the already-running backend run loop has no way of learning about. Without this, any
-  // reconnect mid-run orphaned the run permanently even though the device/Appium session itself
-  // was untouched.
-  let currentSessionId: string | undefined;
-
-  socket.on('connect', () => {
-    socket.emit('cli_auth', {
-      token: opts.authToken,
-      type: 'mobile',
-      platform: opts.platform,
-      deviceId: opts.deviceId,
-      skipAuth: false,
-      sessionId: currentSessionId,
-    });
-  });
-
-  const sessionId = await new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      socket.disconnect();
-      reject(new Error('Socket.IO connection timed out'));
-    }, 15_000);
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
-    socket.on('cli_authenticated', (data: any) => {
-      clearTimeout(timeout);
-      currentSessionId = data.session_id;
-      resolve(data.session_id);
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
-    socket.on('cli_error', (data: any) => {
-      clearTimeout(timeout);
-      reject(new Error(data.message || 'CLI authentication failed'));
-    });
-
-    socket.on('connect_error', (err: Error) => {
-      clearTimeout(timeout);
-      reject(new Error(`Socket.IO connection failed: ${err.message}`));
-    });
-  });
-
-  // Step 3: Listen for agent commands and relay them to Appium
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
-  socket.on('agent_command', async (data: any) => {
-    const { request_id, command, data: cmdData } = data;
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result shape varies per command
-      let result: any = {};
-
-      switch (command) {
-        case 'capture_state': {
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log('[Appium] Capturing screen state...');
-          // `skip_tree` (vision mode): skip the `/source` accessibility-tree dump entirely.
-          // `/source` is a known-slow XCUITest operation on screens with complex native views
-          // (e.g. a live react-native-maps MapView) -- it reliably timed out at 20s on exactly
-          // that kind of screen in real testing. Vision mode never needs the tree (the LLM picks
-          // raw pixel coordinates off the screenshot instead of numbered elements), so skipping
-          // the call outright is the actual fix, not just a longer timeout on a call we don't need.
-          const skipTree = cmdData?.skip_tree === true;
-          const source = skipTree
-            ? null
-            : await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`);
-          const screenshot = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/screenshot`);
-          result = {
-            screenshot_b64: screenshot?.value || '',
-            tree: source?.value || '',
-            url: '',
-            title: '',
+    const capabilities: Record<string, unknown> =
+      opts.platform === 'android'
+        ? {
+            platformName: 'Android',
+            'appium:automationName': 'UiAutomator2',
+            'appium:udid': opts.deviceId,
+            'appium:autoLaunch': false,
+            'appium:noReset': true,
+            // Attach to the current foreground app
+            'appium:autoGrantPermissions': true,
+          }
+        : {
+            platformName: 'iOS',
+            'appium:automationName': 'XCUITest',
+            'appium:udid': opts.deviceId,
+            'appium:autoLaunch': false,
+            'appium:noReset': true,
+            // `traceback setup` pre-builds WDA once via a real `xcodebuild build-for-testing`
+            // (see wda-prebuild.ts) specifically to avoid the first-run compile below -- these two
+            // capabilities are Appium's own documented way to reuse that build: the driver runs
+            // `test-without-building` against whichever simulator this session actually targets
+            // instead of recompiling from scratch.
+            ...(iosHasPrebuiltWda
+              ? { 'appium:usePrebuiltWDA': true, 'appium:derivedDataPath': wdaDerivedDataPath() }
+              : {}),
           };
-          break;
-        }
 
-        case 'execute_action': {
-          const { action, target, value, resolved } = cmdData;
-          /* eslint-disable no-console -- direct user-facing terminal output for live action progress */
-          console.log(
-            `[Appium] ${action} → ${target?.what || 'no target'} (value: ${value || 'none'})`,
-          );
-          if (resolved?.strategy) {
-            console.log(`[Appium] LLM resolved: ${resolved.strategy} = "${resolved.locator}"`);
-          }
-          result = await executeAppiumAction(
-            appiumUrl,
-            appiumSessionId,
-            action,
-            target,
-            value,
-            resolved,
-            opts.platform,
-          );
-          if (result.error) {
-            console.log(`[Appium] ✗ ${result.error}`);
-          } else {
-            console.log(`[Appium] ✓ ${result.result}`);
-          }
-          /* eslint-enable no-console */
-          break;
-        }
-
-        case 'get_screen_size': {
-          const size = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/window/size`);
-          result = {
-            width: Number(size?.value?.width || 400),
-            height: Number(size?.value?.height || 800),
-          };
-          break;
-        }
-
-        case 'goto': {
-          // For mobile, "goto" means open a deep link or URL
-          const url = cmdData.url || '';
-          if (url.startsWith('http')) {
-            await fetchJson(`${appiumUrl}/session/${appiumSessionId}/url`, {
-              method: 'POST',
-              body: JSON.stringify({ url }),
-            });
-          }
-          result = { result: `Navigated to ${url}` };
-          break;
-        }
-
-        case 'open_app': {
-          const bundleId = cmdData.bundle_id || data.bundle_id;
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log(`[Appium] Opening app: ${bundleId}`);
-          await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/activate_app`, {
-            method: 'POST',
-            body: JSON.stringify({ appId: bundleId }),
-          });
-          result = { result: `Opened app ${bundleId}` };
-          break;
-        }
-
-        case 'close_app': {
-          const bundleId = cmdData.bundle_id || data.bundle_id;
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log(`[Appium] Closing app: ${bundleId}`);
-          await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/terminate_app`, {
-            method: 'POST',
-            body: JSON.stringify({ appId: bundleId }),
-          });
-          result = { result: `Closed app ${bundleId}` };
-          break;
-        }
-
-        case 'open_url': {
-          const url = cmdData.url || data.url;
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log(`[Native] Opening URL: ${url}`);
-          if (opts.platform === 'ios') {
-            execSync(`xcrun simctl openurl ${opts.deviceId} "${url}"`);
-          } else {
-            execSync(
-              `adb -s ${opts.deviceId} shell am start -a android.intent.action.VIEW -d "${url}"`,
-            );
-          }
-          result = { result: `Opened URL ${url}` };
-          break;
-        }
-
-        case 'simulate_fingerprint': {
-          const fingerId = cmdData.finger_id || data.finger_id || 1;
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log(`[Appium] Simulating fingerprint ID: ${fingerId}`);
-          await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/finger_print`, {
-            method: 'POST',
-            body: JSON.stringify({ fingerprintId: fingerId }),
-          });
-          result = { result: `Simulated fingerprint ${fingerId}` };
-          break;
-        }
-
-        case 'wait_for_stable': {
-          await new Promise((r) => setTimeout(r, 2000));
-          result = { result: 'Waited for stable' };
-          break;
-        }
-
-        case 'start_recording': {
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log('[Native] Starting screen recording...');
-          try {
-            // Delete any stale recording file
-            await fs.unlink(recordingPath).catch(() => {});
-
-            if (opts.platform === 'ios') {
-              recordingProcess = spawn('xcrun', [
-                'simctl',
-                'io',
-                opts.deviceId,
-                'recordVideo',
-                '--force',
-                recordingPath,
-              ]);
-            } else {
-              // Android: record to device sdcard first
-              // We don't delete stale file on device for brevity, screenrecord overwrites by default usually, but we can rm it
-              execSync(
-                `adb -s ${opts.deviceId} shell rm -f /sdcard/traceback_recording.mp4 || true`,
-              );
-              recordingProcess = spawn('adb', [
-                '-s',
-                opts.deviceId,
-                'shell',
-                'screenrecord',
-                '/sdcard/traceback_recording.mp4',
-              ]);
-            }
-
-            // Ignore stdout/stderr but keep process running
-            recordingProcess.stdout?.on('data', () => {});
-            recordingProcess.stderr?.on('data', () => {});
-
-            result = { result: 'Started recording natively' };
-          } catch (e: unknown) {
-            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-            console.error('[Native] Error starting recording:', e);
-            const message = e instanceof Error ? e.message : String(e);
-            result = { error: `Failed to start recording: ${message}` };
-          }
-          break;
-        }
-
-        case 'stop_recording': {
-          // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-          console.log('[Native] Stopping screen recording...');
-          if (recordingProcess) {
-            // Send SIGINT so the recording finishes encoding properly
-            recordingProcess.kill('SIGINT');
-
-            // Wait for it to cleanly exit
-            await new Promise<void>((resolve) => {
-              const timeout = setTimeout(resolve, 5000); // 5s fallback timeout
-              recordingProcess!.on('exit', () => {
-                clearTimeout(timeout);
-                resolve();
-              });
-            });
-            recordingProcess = null;
-          } else {
-            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-            console.log('[Native] No recording process found');
-          }
-
-          try {
-            if (opts.platform === 'android') {
-              // Pull the file from Android sdcard
-              execSync(
-                `adb -s ${opts.deviceId} pull /sdcard/traceback_recording.mp4 ${recordingPath}`,
-              );
-              execSync(`adb -s ${opts.deviceId} shell rm /sdcard/traceback_recording.mp4 || true`);
-            }
-
-            const videoBuffer = await fs.readFile(recordingPath);
-            result = { video_b64: videoBuffer.toString('base64') };
-
-            // Cleanup local file
-            await fs.unlink(recordingPath).catch(() => {});
-          } catch (e: unknown) {
-            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-            console.error('[Native] Error retrieving recording:', e);
-            result = { video_b64: '' };
-          }
-
-          break;
-        }
-
-        default:
-          result = { error: `Unknown command: ${command}` };
-      }
-
-      // Send the result back to the backend agent
-      socket.emit('agent_response', { request_id, data: result });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- command dispatch error shape not modeled client-side
-    } catch (err: any) {
-      socket.emit('agent_response', {
-        request_id,
-        data: { error: err.message || 'Command failed' },
-      });
+    if (opts.platform === 'ios' && !iosHasPrebuiltWda) {
+      // The first session against a given simulator has to compile WebDriverAgent via a real
+      // `xcodebuild build-for-testing` before Appium's XCUITest driver can do anything -- there's
+      // no Android equivalent (UiAutomator2 is a pre-built driver). Without this line, that
+      // multi-minute one-time cost looks indistinguishable from a hang: this exact confusion led
+      // to a real incident (2026-08-12) where a perfectly healthy, still-building WDA process was
+      // repeatedly killed because it "looked stuck" (low CPU%, no output) when it was actually
+      // working -- destroying its build cache and forcing a full cold rebuild each time. Once WDA
+      // is built for a given simulator, Appium detects and reuses the still-running instance, so
+      // every session after the first is fast, same as Android. `traceback setup` now offers to
+      // pre-build WDA up front specifically to avoid this path -- reaching it means that either
+      // wasn't run, was skipped, or failed (see its own output for which).
+      // eslint-disable-next-line no-console
+      console.log(
+        "ℹ First run on this simulator: iOS has to build WebDriverAgent (Appium's driver " +
+          'companion app) via Xcode before it can start — this can take a few minutes. Later ' +
+          'runs against the same simulator reuse it and start in seconds. (Run `traceback setup` ' +
+          'to pre-build it up front next time.)',
+      );
     }
-  });
 
-  // Step 4: Return the session for use in run requests
-  return {
-    sessionId,
-    appiumSessionId,
-    close: async () => {
-      socket.disconnect();
-      // End the Appium session
+    const sessionRes = await fetchJson(
+      `${appiumUrl}/session`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          capabilities: { alwaysMatch: capabilities },
+        }),
+      },
+      0,
+      APPIUM_SESSION_CREATE_TIMEOUT_MS[opts.platform],
+    );
+
+    const appiumSessionId = sessionRes?.value?.sessionId;
+    if (!appiumSessionId) {
+      throw new Error(
+        'Failed to create Appium session — is Appium running and the device connected?',
+      );
+    }
+
+    // Step 2: Connect to the backend via Socket.IO
+    const socketUrl = opts.apiBaseUrl.replace(/\/api\/v1$/, '');
+    const socket: Socket = io(socketUrl, {
+      path: '/socket.io',
+      transports: ['websocket'],
+      auth: { token: opts.authToken },
+      query: { token: opts.authToken },
+      // Keep the connection alive — mobile runs can take minutes.
+      // Without these, Socket.IO drops the connection after ~25s idle.
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 30_000,
+    });
+
+    // Reconnects (Socket.IO auto-reconnect after a network blip) re-fire 'connect' and re-run
+    // this handshake. Tracking the session id here and sending it back as `sessionId` on every
+    // `cli_auth` -- not just the first -- lets the backend rebind the SAME session onto the new
+    // socket (see `mobile_bridge.register`'s `resume_session_id`) instead of minting a new one
+    // that the already-running backend run loop has no way of learning about. Without this, any
+    // reconnect mid-run orphaned the run permanently even though the device/Appium session itself
+    // was untouched.
+    let currentSessionId: string | undefined;
+
+    socket.on('connect', () => {
+      socket.emit('cli_auth', {
+        token: opts.authToken,
+        type: 'mobile',
+        platform: opts.platform,
+        deviceId: opts.deviceId,
+        skipAuth: false,
+        sessionId: currentSessionId,
+      });
+    });
+
+    const sessionId = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        socket.disconnect();
+        reject(new Error('Socket.IO connection timed out'));
+      }, 15_000);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
+      socket.on('cli_authenticated', (data: any) => {
+        clearTimeout(timeout);
+        currentSessionId = data.session_id;
+        resolve(data.session_id);
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
+      socket.on('cli_error', (data: any) => {
+        clearTimeout(timeout);
+        reject(new Error(data.message || 'CLI authentication failed'));
+      });
+
+      socket.on('connect_error', (err: Error) => {
+        clearTimeout(timeout);
+        reject(new Error(`Socket.IO connection failed: ${err.message}`));
+      });
+    });
+
+    // Step 3: Listen for agent commands and relay them to Appium
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- socket.io payload shape not modeled client-side
+    socket.on('agent_command', async (data: any) => {
+      const { request_id, command, data: cmdData } = data;
+
       try {
-        await fetchJson(`${appiumUrl}/session/${appiumSessionId}`, { method: 'DELETE' });
-      } catch {
-        // Session might already be gone
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- result shape varies per command
+        let result: any = {};
+
+        switch (command) {
+          case 'capture_state': {
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log('[Appium] Capturing screen state...');
+            // `skip_tree` (vision mode): skip the `/source` accessibility-tree dump entirely.
+            // `/source` is a known-slow XCUITest operation on screens with complex native views
+            // (e.g. a live react-native-maps MapView) -- it reliably timed out at 20s on exactly
+            // that kind of screen in real testing. Vision mode never needs the tree (the LLM picks
+            // raw pixel coordinates off the screenshot instead of numbered elements), so skipping
+            // the call outright is the actual fix, not just a longer timeout on a call we don't need.
+            const skipTree = cmdData?.skip_tree === true;
+            const source = skipTree
+              ? null
+              : await fetchJson(`${appiumUrl}/session/${appiumSessionId}/source`);
+            const screenshot = await fetchJson(
+              `${appiumUrl}/session/${appiumSessionId}/screenshot`,
+            );
+            result = {
+              screenshot_b64: screenshot?.value || '',
+              tree: source?.value || '',
+              url: '',
+              title: '',
+            };
+            break;
+          }
+
+          case 'execute_action': {
+            const { action, target, value, resolved } = cmdData;
+            /* eslint-disable no-console -- direct user-facing terminal output for live action progress */
+            console.log(
+              `[Appium] ${action} → ${target?.what || 'no target'} (value: ${value || 'none'})`,
+            );
+            if (resolved?.strategy) {
+              console.log(`[Appium] LLM resolved: ${resolved.strategy} = "${resolved.locator}"`);
+            }
+            result = await executeAppiumAction(
+              appiumUrl,
+              appiumSessionId,
+              action,
+              target,
+              value,
+              resolved,
+              opts.platform,
+            );
+            if (result.error) {
+              console.log(`[Appium] ✗ ${result.error}`);
+            } else {
+              console.log(`[Appium] ✓ ${result.result}`);
+            }
+            /* eslint-enable no-console */
+            break;
+          }
+
+          case 'get_screen_size': {
+            const size = await fetchJson(`${appiumUrl}/session/${appiumSessionId}/window/size`);
+            result = {
+              width: Number(size?.value?.width || 400),
+              height: Number(size?.value?.height || 800),
+            };
+            break;
+          }
+
+          case 'goto': {
+            // For mobile, "goto" means open a deep link or URL
+            const url = cmdData.url || '';
+            if (url.startsWith('http')) {
+              await fetchJson(`${appiumUrl}/session/${appiumSessionId}/url`, {
+                method: 'POST',
+                body: JSON.stringify({ url }),
+              });
+            }
+            result = { result: `Navigated to ${url}` };
+            break;
+          }
+
+          case 'open_app': {
+            const bundleId = cmdData.bundle_id || data.bundle_id;
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log(`[Appium] Opening app: ${bundleId}`);
+            await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/activate_app`, {
+              method: 'POST',
+              body: JSON.stringify({ appId: bundleId }),
+            });
+            result = { result: `Opened app ${bundleId}` };
+            break;
+          }
+
+          case 'close_app': {
+            const bundleId = cmdData.bundle_id || data.bundle_id;
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log(`[Appium] Closing app: ${bundleId}`);
+            await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/terminate_app`, {
+              method: 'POST',
+              body: JSON.stringify({ appId: bundleId }),
+            });
+            result = { result: `Closed app ${bundleId}` };
+            break;
+          }
+
+          case 'open_url': {
+            const url = cmdData.url || data.url;
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log(`[Native] Opening URL: ${url}`);
+            if (opts.platform === 'ios') {
+              execSync(`xcrun simctl openurl ${opts.deviceId} "${url}"`);
+            } else {
+              execSync(
+                `adb -s ${opts.deviceId} shell am start -a android.intent.action.VIEW -d "${url}"`,
+              );
+            }
+            result = { result: `Opened URL ${url}` };
+            break;
+          }
+
+          case 'simulate_fingerprint': {
+            const fingerId = cmdData.finger_id || data.finger_id || 1;
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log(`[Appium] Simulating fingerprint ID: ${fingerId}`);
+            await fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/device/finger_print`, {
+              method: 'POST',
+              body: JSON.stringify({ fingerprintId: fingerId }),
+            });
+            result = { result: `Simulated fingerprint ${fingerId}` };
+            break;
+          }
+
+          case 'wait_for_stable': {
+            await new Promise((r) => setTimeout(r, 2000));
+            result = { result: 'Waited for stable' };
+            break;
+          }
+
+          case 'start_recording': {
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log('[Native] Starting screen recording...');
+            try {
+              // Delete any stale recording file
+              await fs.unlink(recordingPath).catch(() => {});
+
+              if (opts.platform === 'ios') {
+                recordingProcess = spawn('xcrun', [
+                  'simctl',
+                  'io',
+                  opts.deviceId,
+                  'recordVideo',
+                  '--force',
+                  recordingPath,
+                ]);
+              } else {
+                // Android: record to device sdcard first
+                // We don't delete stale file on device for brevity, screenrecord overwrites by default usually, but we can rm it
+                execSync(
+                  `adb -s ${opts.deviceId} shell rm -f /sdcard/traceback_recording.mp4 || true`,
+                );
+                recordingProcess = spawn('adb', [
+                  '-s',
+                  opts.deviceId,
+                  'shell',
+                  'screenrecord',
+                  '/sdcard/traceback_recording.mp4',
+                ]);
+              }
+
+              // Ignore stdout/stderr but keep process running
+              recordingProcess.stdout?.on('data', () => {});
+              recordingProcess.stderr?.on('data', () => {});
+
+              result = { result: 'Started recording natively' };
+            } catch (e: unknown) {
+              // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+              console.error('[Native] Error starting recording:', e);
+              const message = e instanceof Error ? e.message : String(e);
+              result = { error: `Failed to start recording: ${message}` };
+            }
+            break;
+          }
+
+          case 'stop_recording': {
+            // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+            console.log('[Native] Stopping screen recording...');
+            if (recordingProcess) {
+              // Send SIGINT so the recording finishes encoding properly
+              recordingProcess.kill('SIGINT');
+
+              // Wait for it to cleanly exit
+              await new Promise<void>((resolve) => {
+                const timeout = setTimeout(resolve, 5000); // 5s fallback timeout
+                recordingProcess!.on('exit', () => {
+                  clearTimeout(timeout);
+                  resolve();
+                });
+              });
+              recordingProcess = null;
+            } else {
+              // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+              console.log('[Native] No recording process found');
+            }
+
+            try {
+              if (opts.platform === 'android') {
+                // Pull the file from Android sdcard
+                execSync(
+                  `adb -s ${opts.deviceId} pull /sdcard/traceback_recording.mp4 ${recordingPath}`,
+                );
+                execSync(
+                  `adb -s ${opts.deviceId} shell rm /sdcard/traceback_recording.mp4 || true`,
+                );
+              }
+
+              const videoBuffer = await fs.readFile(recordingPath);
+              result = { video_b64: videoBuffer.toString('base64') };
+
+              // Cleanup local file
+              await fs.unlink(recordingPath).catch(() => {});
+            } catch (e: unknown) {
+              // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+              console.error('[Native] Error retrieving recording:', e);
+              result = { video_b64: '' };
+            }
+
+            break;
+          }
+
+          default:
+            result = { error: `Unknown command: ${command}` };
+        }
+
+        // Send the result back to the backend agent
+        socket.emit('agent_response', { request_id, data: result });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- command dispatch error shape not modeled client-side
+      } catch (err: any) {
+        socket.emit('agent_response', {
+          request_id,
+          data: { error: err.message || 'Command failed' },
+        });
       }
-    },
-  };
+    });
+
+    // Step 4: Return the session for use in run requests
+    return {
+      sessionId,
+      appiumSessionId,
+      close: async () => {
+        socket.disconnect();
+        // End the Appium session
+        try {
+          await fetchJson(`${appiumUrl}/session/${appiumSessionId}`, { method: 'DELETE' });
+        } catch {
+          // Session might already be gone
+        }
+        // Stop the Appium server if it was started by the CLI
+        try {
+          await serverHandle.stop();
+        } catch {
+          // Ignore errors stopping server
+        }
+      },
+    };
+  } catch (err) {
+    try {
+      await serverHandle.stop();
+    } catch {
+      // Ignore
+    }
+    throw err;
+  }
 }
 
 /**
