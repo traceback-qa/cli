@@ -104,9 +104,11 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
       return;
     }
 
-    ui.info(`\nRunning: "${opts.goal.slice(0, 100)}${opts.goal.length > 100 ? '...' : ''}"\n`);
-    ui.hint('Agent decisions and Appium actions stream below. Press Ctrl+C to stop.');
-    await watchRun(config.apiUrl, token.accessToken, runId, ui, controller.signal);
+    await watchRun(config.apiUrl, token.accessToken, runId, ui, controller.signal, {
+      testName: opts.goal,
+      environment: 'mobile',
+      targetName: `${opts.platform.toUpperCase()} (${opts.device.name})`,
+    });
 
     if (interrupted) {
       ui.warn('Mobile run stopped. The Appium session has been closed.');

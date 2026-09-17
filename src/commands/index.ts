@@ -10,3 +10,4 @@ export { registerMcpCommands } from './mcp/index.js';
 export { registerMobileCommands } from './mobile/index.js';
 export { registerSetupCommands } from './setup/index.js';
 export { registerSkillsCommands } from './skills/index.js';
+export { registerRunsCommands } from './runs/index.js';

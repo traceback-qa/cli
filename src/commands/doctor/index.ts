@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import chalk from 'chalk';
 import type { getContext as GetContextFn } from '../../cli.js';
 
 type ContextGetter = typeof GetContextFn;
@@ -11,22 +12,51 @@ export function registerDoctorCommands(program: Command, getContext: ContextGett
       const ctx = getContext(this);
       if (!ctx) return;
 
-      ctx.infra.ui.info('Running diagnostics...\n');
+      const ui = ctx.infra.ui;
+      ui.banner('Traceback Doctor', 'System & Environment Diagnostics');
 
+      const spinner = ui.spinner('Analyzing environment and dependencies...');
       const results = await ctx.services.doctor.runDiagnostics();
+      spinner.stop();
+
+      let okCount = 0;
+      let warnCount = 0;
+      let errCount = 0;
 
       for (const result of results) {
-        const icon =
-          result.status === 'ok'
-            ? ctx.infra.ui.success
-            : result.status === 'warning'
-              ? ctx.infra.ui.warn
-              : ctx.infra.ui.error;
-
-        icon.call(ctx.infra.ui, result.message);
-        if (result.suggestion) {
-          ctx.infra.ui.hint(result.suggestion);
+        if (result.status === 'ok') {
+          okCount++;
+          ui.success(result.message);
+        } else if (result.status === 'warning') {
+          warnCount++;
+          ui.warn(result.message);
+          if (result.suggestion) {
+            ui.hint(chalk.yellow(`↳ Suggestion: ${result.suggestion}`));
+          }
+        } else {
+          errCount++;
+          ui.error(result.message);
+          if (result.suggestion) {
+            ui.hint(chalk.red(`↳ Fix: ${result.suggestion}`));
+          }
         }
+      }
+
+      ui.hint('');
+      if (errCount === 0 && warnCount === 0) {
+        ui.success(`All ${okCount} diagnostics passed cleanly. Your environment is fully ready!`);
+      } else if (errCount === 0) {
+        ui.warn(
+          `${okCount} passed, ${warnCount} warning(s). Traceback should work, but check suggestions above.`,
+        );
+      } else {
+        ui.errorCard(
+          'Diagnostics Incomplete',
+          `Found ${errCount} error(s) and ${warnCount} warning(s).`,
+          results
+            .filter((r) => r.status === 'error' && r.suggestion)
+            .map((r) => r.suggestion as string),
+        );
       }
     });
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import chalk from 'chalk';
+import boxen from 'boxen';
 import { bootstrap } from './bootstrap.js';
 import { registerGlobalFlags, extractGlobalFlags } from './middleware/global-flags.js';
 import { BUILD_INFO } from './build-info.js';
@@ -16,6 +18,7 @@ import {
   registerMobileCommands,
   registerSetupCommands,
   registerSkillsCommands,
+  registerRunsCommands,
 } from './commands/index.js';
 import type { CliContext } from './types/context.js';
 
@@ -40,9 +43,20 @@ async function main(): Promise<void> {
 
   program
     .name('traceback')
-    .description('Traceback CLI — trace, debug, and fix production issues')
+    .description(
+      chalk.hex('#6366F1').bold('Traceback CLI') +
+        ' — AI browser & mobile test automation from your terminal',
+    )
     .version(BUILD_INFO.version, '-v, --version', 'Output the current version')
     .helpOption('-h, --help', 'Display help for command');
+
+  program.configureHelp({
+    subcommandTerm: (cmd) => chalk.cyan.bold(cmd.name()),
+    commandUsage: (cmd) => `${chalk.hex('#6366F1').bold(cmd.name())} ${chalk.dim(cmd.usage())}`,
+    commandDescription: (cmd) => chalk.white(cmd.description()),
+    optionTerm: (opt) => chalk.yellow(opt.flags),
+    optionDescription: (opt) => chalk.gray(opt.description),
+  });
 
   registerGlobalFlags(program);
 
@@ -65,6 +79,7 @@ async function main(): Promise<void> {
   registerMobileCommands(program, getContext);
   registerSetupCommands(program, getContext);
   registerSkillsCommands(program, getContext);
+  registerRunsCommands(program, getContext);
 
   program
     .command('login')
@@ -83,7 +98,7 @@ async function main(): Promise<void> {
 
         const account = await ctx.infra.auth.getCurrentAccount();
         if (account) {
-          ctx.infra.ui.info(`Logged in as ${account.email || account.accountId}`);
+          ctx.infra.ui.info(`Logged in as ${chalk.bold.white(account.email || account.accountId)}`);
         }
       } catch (error) {
         spinner.fail('Authentication failed');
@@ -91,17 +106,85 @@ async function main(): Promise<void> {
       }
     });
 
+  // Launch interactive home menu if invoked with no arguments in a terminal
+  if (process.argv.slice(2).length === 0 && process.stdin.isTTY && !process.env.CI) {
+    await launchInteractiveHome(program);
+    return;
+  }
+
   await program.parseAsync(process.argv);
 }
 
-main().catch((error) => {
-  if (error instanceof Error) {
-    // eslint-disable-next-line no-console -- last-resort fatal handler, no ctx/logger available here
-    console.error(`Fatal error: ${error.message}`);
-  } else {
-    // eslint-disable-next-line no-console -- last-resort fatal handler, no ctx/logger available here
-    console.error(`Fatal error: ${String(error)}`);
+async function launchInteractiveHome(program: Command): Promise<void> {
+  const ctx = await bootstrap({
+    debug: false,
+    silent: false,
+    json: false,
+    ci: false,
+    noColor: false,
+  });
+  const ui = ctx.infra.ui;
+  const isAuth = await ctx.infra.auth.isAuthenticated();
+  const account = isAuth ? await ctx.infra.auth.getCurrentAccount() : null;
+  const config = await ctx.infra.config.loadGlobalConfig();
+  const workspaceId = config.workspaceId;
+
+  const userLabel =
+    account?.email ||
+    (account?.accountId
+      ? `ID: ${account.accountId}`
+      : chalk.yellow('Not logged in (run `traceback login`)'));
+  const wsLabel = workspaceId ? chalk.cyan.bold(workspaceId) : chalk.dim('None selected');
+
+  ui.box(
+    `${chalk.hex('#6366F1').bold('Traceback AI Testing Platform')}\n\n` +
+      `  ${chalk.dim('User:')}        ${chalk.white(userLabel)}\n` +
+      `  ${chalk.dim('Workspace:')}   ${wsLabel}\n` +
+      `  ${chalk.dim('API Host:')}    ${chalk.gray(config.apiUrl || 'https://api.traceback.dev')}`,
+    { title: 'Welcome to Traceback', borderColor: '#6366F1' },
+  );
+
+  const { select } = await import('@inquirer/prompts');
+  const action = await select({
+    message: 'What would you like to do?',
+    choices: [
+      { name: '🧪  Browse & Run Tests (Web & Mobile)', value: 'tests' },
+      { name: '📋  Inspect Past Test Runs History', value: 'runs' },
+      { name: '🏢  Switch Active Workspace', value: 'workspaces' },
+      { name: '🩺  Run System Diagnostics (Doctor)', value: 'doctor' },
+      { name: '🔧  Configure Mobile Dependencies (Setup)', value: 'setup' },
+      { name: '👤  View Account & Authentication Profile', value: 'auth status' },
+      { name: '📖  Show All Commands & CLI Help', value: 'help' },
+      { name: chalk.dim('🚪  Exit'), value: 'exit' },
+    ],
+  });
+
+  if (action === 'exit') {
+    return;
   }
+  if (action === 'help') {
+    program.outputHelp();
+    return;
+  }
+
+  const args = action.split(' ');
+  await program.parseAsync(['node', 'traceback', ...args]);
+}
+
+main().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  // eslint-disable-next-line no-console
+  console.error(
+    boxen(
+      `${chalk.red.bold('✖ Fatal Error:')} ${message}\n\n${chalk.dim('Run `traceback doctor` or `traceback --help` for assistance.')}`,
+      {
+        padding: 1,
+        margin: { top: 1, bottom: 1, left: 0, right: 0 },
+        borderColor: 'red',
+        borderStyle: 'round',
+      },
+    ),
+  );
   process.exit(2);
 });
 

@@ -1,44 +1,37 @@
 /**
- * Setup command — installs the local tooling `traceback mobile verify` needs.
+ * Setup command — automated installer and environment configurator for mobile testing.
  *
- * `traceback mobile` drives a real Android emulator/iOS simulator via Appium
- * (`src/infrastructure/mobile/appium.bridge.ts`, `device.detector.ts`) — none of that ships as a
- * dependency of this package (Appium itself, its two device drivers, and the platform SDKs are
- * all much bigger installs than a CLI should silently drag in), so up to now a first-time user
- * hit "Make sure Appium is running: `appium`" with no way to get there from inside the CLI.
- *
- * What this does and doesn't install:
- *   - Appium itself + the uiautomator2/xcuitest drivers: installed here (`npm install -g`, then
- *     `appium driver install`), since those are just npm packages this CLI can safely run.
- *   - ffmpeg: installed here too — a static build downloaded into the Traceback data dir (no
- *     brew/package manager needed). iOS screen recording encodes with it; Android records
- *     on-device and doesn't need it.
- *   - Android platform-tools (`adb`) / Xcode Command Line Tools (`xcrun`): only detected, never
- *     auto-installed. These are multi-gigabyte, often-interactive installs (Android Studio,
- *     Xcode from the App Store) — the responsible move is pointing at the real installer, not
- *     silently kicking one off.
- *   - WebDriverAgent (iOS only): pre-built here via a real `xcodebuild build-for-testing` — see
- *     wda-prebuild.ts for why. Unlike the installs above this is a build, not a package fetch,
- *     so it's best-effort: Xcode/signing quirks can make it fail on a given machine in ways
- *     `npm install` never does, and a failure here just leaves the first real iOS run to build
- *     it instead (the pre-existing behavior, not a regression).
+ * Scans all requirements up front, prompts for a single confirmation, runs structured
+ * installation steps with live progress, and renders a final environment matrix card.
  */
 
 import type { Command } from 'commander';
 import { execSync, spawn } from 'child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import chalk from 'chalk';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { UIService } from '../../infrastructure/ui/ui.types.js';
 import { getDataDir } from '../../platform/paths.js';
 import { xcodeAppInstalled } from '../../infrastructure/mobile/device.detector.js';
 import {
+  appiumHome,
   wdaDerivedDataPath,
   wdaIsPrebuilt,
   wdaProjectPath,
 } from '../../infrastructure/mobile/wda-prebuild.js';
 
 type ContextGetter = typeof GetContextFn;
+
+interface DependencyStatus {
+  name: string;
+  category: 'core' | 'driver' | 'media' | 'sdk' | 'optimization';
+  installed: boolean;
+  version?: string;
+  path?: string;
+  actionRequired?: string;
+  autoInstallable: boolean;
+}
 
 const DRIVERS: { name: string; label: string; macOnly: boolean }[] = [
   { name: 'uiautomator2', label: 'Android (uiautomator2)', macOnly: false },
@@ -49,23 +42,89 @@ export function registerSetupCommands(program: Command, getContext: ContextGette
   program
     .command('setup')
     .description('Install Appium and the drivers needed for `traceback mobile verify`')
-    .option('-y, --yes', 'Skip confirmation prompts', false)
+    .option('-y, --yes', 'Skip confirmation prompts and install all missing dependencies', false)
     .action(async function (this: Command, options: { yes: boolean }) {
       const ctx = getContext(this);
       if (!ctx) return;
       const ui = ctx.infra.ui;
 
-      ui.info('Checking mobile testing dependencies...\n');
+      ui.banner('Traceback Mobile Setup', 'Automated Tooling & Environment Configurator');
 
-      await ensureAppium(ui, options.yes);
-      await ensureDrivers(ui, options.yes);
-      await ensureFfmpeg(ui, options.yes);
+      // ── Step 1: Up-Front Dependency Scan ──────────────────────
+      const scanSpinner = ui.spinner('Scanning local mobile dependencies and SDKs...');
+      const depStatus = scanAllDependencies();
+      scanSpinner.stop();
+
+      const missingInstallable = depStatus.filter((d) => !d.installed && d.autoInstallable);
+      const manualChecks = depStatus.filter((d) => !d.installed && !d.autoInstallable);
+
+      // Render pre-scan summary checklist
+      ui.step('1/4', 'Pre-flight Environment Check');
+      for (const dep of depStatus) {
+        if (dep.installed) {
+          ui.success(`${dep.name}: ${chalk.dim(dep.version || dep.path || 'Configured')}`);
+        } else if (dep.autoInstallable) {
+          ui.warn(`${dep.name}: ${chalk.yellow('Missing')} ${chalk.dim('→ Will be installed')}`);
+        } else {
+          ui.warn(
+            `${dep.name}: ${chalk.yellow('Not found')} ${chalk.dim(`(${dep.actionRequired || 'Manual install required'})`)}`,
+          );
+        }
+      }
+
+      // ── Step 2: Single Batch Confirmation ─────────────────────
+      if (missingInstallable.length > 0 && !options.yes && process.stdin.isTTY) {
+        ui.hint('');
+        const { confirm } = await import('@inquirer/prompts');
+        const proceed = await confirm({
+          message: `Install ${missingInstallable.length} missing package(s) (${missingInstallable.map((d) => d.name).join(', ')})?`,
+          default: true,
+        });
+
+        if (!proceed) {
+          ui.warn('Setup cancelled. You can re-run `traceback setup` at any time.');
+          return;
+        }
+      }
+
+      // ── Step 3: Structured Step-by-Step Installation ──────────
+      ui.hint('');
+      ui.step('2/4', 'Core Engine & Drivers');
+      await ensureAppium(ui);
+      await ensureDrivers(ui);
+
+      ui.step('3/4', 'Screen Recording & Media Engine');
+      await ensureFfmpeg(ui);
+
+      ui.step('4/4', 'Platform SDKs & iOS Optimizations');
       checkJava(ui);
       checkAndroidSdk(ui);
       checkXcode(ui);
-      await ensureWdaPrebuilt(ui, options.yes);
+      await ensureWdaPrebuilt(ui);
 
-      ui.info('\nDone. Run `traceback doctor` any time to re-check your setup.');
+      // ── Step 4: Final Environment Matrix Table Card ───────────
+      ui.hint('');
+      const finalScan = scanAllDependencies();
+      const headers = ['Component', 'Status', 'Version / Detail'];
+      const rows = finalScan.map((d) => [
+        d.name,
+        d.installed ? chalk.green('✔ Configured') : chalk.yellow('⚠ Action Required'),
+        d.version || d.path || d.actionRequired || '—',
+      ]);
+
+      ui.table(headers, rows);
+
+      if (manualChecks.length > 0) {
+        ui.hint(
+          chalk.yellow(
+            `\nNote: ${manualChecks.length} platform SDK(s) require manual installation if you plan to test on them (see suggestions above).`,
+          ),
+        );
+      }
+
+      ui.success(
+        'Setup complete! Run `traceback doctor` or `traceback mobile verify` to start testing.',
+      );
     });
 }
 
@@ -78,8 +137,148 @@ function commandExists(cmd: string): boolean {
   }
 }
 
-/** Run a command with output streamed straight to the terminal (npm/appium installs are slow
- * and users should see real progress, not a silent spinner). Resolves to the exit code. */
+function scanAllDependencies(): DependencyStatus[] {
+  const isMac = process.platform === 'darwin';
+  const list: DependencyStatus[] = [];
+
+  // Appium
+  if (commandExists('appium')) {
+    try {
+      const version = execSync('appium --version', { encoding: 'utf-8', timeout: 3000 }).trim();
+      list.push({
+        name: 'Appium Server',
+        category: 'core',
+        installed: true,
+        version: `v${version}`,
+        autoInstallable: true,
+      });
+    } catch {
+      list.push({
+        name: 'Appium Server',
+        category: 'core',
+        installed: false,
+        autoInstallable: true,
+      });
+    }
+  } else {
+    list.push({ name: 'Appium Server', category: 'core', installed: false, autoInstallable: true });
+  }
+
+  // Drivers
+  const installedDrivers = listInstalledDrivers();
+  list.push({
+    name: 'Android Driver (uiautomator2)',
+    category: 'driver',
+    installed: installedDrivers.has('uiautomator2'),
+    version: installedDrivers.has('uiautomator2') ? 'Installed' : undefined,
+    autoInstallable: true,
+  });
+
+  if (isMac) {
+    list.push({
+      name: 'iOS Driver (xcuitest)',
+      category: 'driver',
+      installed: installedDrivers.has('xcuitest'),
+      version: installedDrivers.has('xcuitest') ? 'Installed' : undefined,
+      autoInstallable: true,
+    });
+  }
+
+  // ffmpeg
+  const binPath = ffmpegBinPath();
+  if (commandExists('ffmpeg') || fs.existsSync(binPath)) {
+    list.push({
+      name: 'ffmpeg Screen Recorder',
+      category: 'media',
+      installed: true,
+      path: fs.existsSync(binPath) ? binPath : 'system PATH',
+      autoInstallable: true,
+    });
+  } else {
+    list.push({
+      name: 'ffmpeg Screen Recorder',
+      category: 'media',
+      installed: false,
+      autoInstallable: true,
+    });
+  }
+
+  // Java
+  try {
+    const javaOut = execSync('java -version 2>&1', { encoding: 'utf-8', timeout: 3000 }).trim();
+    const javaVer = javaOut.split('\n')[0] || 'Found';
+    list.push({
+      name: 'Java JDK 17',
+      category: 'sdk',
+      installed: true,
+      version: javaVer,
+      autoInstallable: false,
+    });
+  } catch {
+    list.push({
+      name: 'Java JDK 17',
+      category: 'sdk',
+      installed: false,
+      actionRequired: 'Install via `brew install openjdk@17` or https://adoptium.net',
+      autoInstallable: false,
+    });
+  }
+
+  // Android SDK
+  if (commandExists('adb')) {
+    list.push({
+      name: 'Android platform-tools (adb)',
+      category: 'sdk',
+      installed: true,
+      version: 'Available on PATH',
+      autoInstallable: false,
+    });
+  } else {
+    list.push({
+      name: 'Android platform-tools (adb)',
+      category: 'sdk',
+      installed: false,
+      actionRequired: 'Install Android Studio or platform-tools',
+      autoInstallable: false,
+    });
+  }
+
+  // Xcode
+  if (isMac) {
+    try {
+      execSync('xcrun simctl list devices', { stdio: 'pipe', timeout: 5000 });
+      list.push({
+        name: 'Xcode Command Line Tools',
+        category: 'sdk',
+        installed: true,
+        version: 'Configured with simctl',
+        autoInstallable: false,
+      });
+    } catch {
+      list.push({
+        name: 'Xcode Command Line Tools',
+        category: 'sdk',
+        installed: false,
+        actionRequired: xcodeAppInstalled()
+          ? 'Run `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`'
+          : 'Run `xcode-select --install`',
+        autoInstallable: false,
+      });
+    }
+
+    // WebDriverAgent Prebuild
+    list.push({
+      name: 'WebDriverAgent Pre-build',
+      category: 'optimization',
+      installed: wdaIsPrebuilt(),
+      version: wdaIsPrebuilt() ? 'Pre-built' : undefined,
+      autoInstallable: true,
+    });
+  }
+
+  return list;
+}
+
 async function runStreamed(command: string, args: string[]): Promise<number> {
   return await new Promise((resolve) => {
     const child = spawn(command, args, { stdio: 'inherit' });
@@ -88,80 +287,47 @@ async function runStreamed(command: string, args: string[]): Promise<number> {
   });
 }
 
-async function ensureAppium(ui: UIService, skipConfirm: boolean): Promise<void> {
+async function ensureAppium(ui: UIService): Promise<void> {
   if (commandExists('appium')) {
     const version = execSync('appium --version', { encoding: 'utf-8' }).trim();
-    ui.success(`Appium already installed (${version})`);
+    ui.success(`Appium is ready (${chalk.dim(`v${version}`)}).`);
     return;
   }
 
-  ui.warn('Appium is not installed.');
-  if (!skipConfirm) {
-    const { confirm } = await import('@inquirer/prompts');
-    const install = await confirm({
-      message: 'Install Appium now (npm install -g appium)?',
-      default: true,
-    });
-    if (!install) {
-      ui.hint("Skipped. Install it yourself with `npm install -g appium` when you're ready.");
-      return;
-    }
-  }
-
-  ui.info('Installing Appium...');
+  ui.info('Installing Appium globally via npm...');
   const code = await runStreamed('npm', ['install', '-g', 'appium']);
   if (code === 0 && commandExists('appium')) {
-    ui.success('Appium installed.');
+    ui.success('Appium installed successfully.');
   } else {
-    ui.error('Appium install failed — see the output above.');
-    ui.hint('You can retry manually with `npm install -g appium`.');
+    ui.error('Appium installation failed.');
+    ui.hint('Retry manually with `npm install -g appium`.');
   }
 }
 
 function listInstalledDrivers(): Set<string> {
-  try {
-    const raw = execSync('appium driver list --json', { encoding: 'utf-8', stdio: 'pipe' });
-    const parsed = JSON.parse(raw) as Record<string, { installed?: boolean }>;
-    return new Set(
-      Object.entries(parsed)
-        .filter(([, info]) => info?.installed)
-        .map(([name]) => name),
-    );
-  } catch {
-    // Appium missing, or an older/newer CLI with a different `driver list` output shape --
-    // either way, fall through and let `appium driver install` itself be the source of truth
-    // (it no-ops cleanly if a driver's already there).
-    return new Set();
+  const set = new Set<string>();
+  const home = appiumHome();
+
+  if (fs.existsSync(path.join(home, 'node_modules', 'appium-uiautomator2-driver'))) {
+    set.add('uiautomator2');
   }
+  if (fs.existsSync(path.join(home, 'node_modules', 'appium-xcuitest-driver'))) {
+    set.add('xcuitest');
+  }
+
+  return set;
 }
 
-async function ensureDrivers(ui: UIService, skipConfirm: boolean): Promise<void> {
-  if (!commandExists('appium')) return; // nothing to install drivers into
+async function ensureDrivers(ui: UIService): Promise<void> {
+  if (!commandExists('appium')) return;
 
   const installed = listInstalledDrivers();
   const applicable = DRIVERS.filter((d) => !d.macOnly || process.platform === 'darwin');
-  const needed: typeof DRIVERS = [];
+  const needed = applicable.filter((d) => !installed.has(d.name));
 
-  for (const driver of applicable) {
-    if (installed.has(driver.name)) {
-      ui.success(`Driver already installed: ${driver.label}`);
-    } else {
-      needed.push(driver);
-    }
-  }
-
-  if (needed.length === 0) return;
-
-  if (!skipConfirm) {
-    const { confirm } = await import('@inquirer/prompts');
-    const install = await confirm({
-      message: `Install ${needed.length} Appium driver${needed.length > 1 ? 's' : ''} (${needed.map((d) => d.label).join(', ')})?`,
-      default: true,
-    });
-    if (!install) {
-      ui.hint('Skipped. Install a driver later with `appium driver install <name>`.');
-      return;
-    }
+  if (needed.length === 0) {
+    ui.success('All required Appium drivers are installed.');
+    return;
   }
 
   for (const driver of needed) {
@@ -170,14 +336,13 @@ async function ensureDrivers(ui: UIService, skipConfirm: boolean): Promise<void>
     if (code === 0) {
       ui.success(`Driver installed: ${driver.label}`);
     } else {
-      ui.error(`Failed to install driver: ${driver.label} — see the output above.`);
+      ui.error(`Failed to install driver: ${driver.label}`);
     }
   }
 }
 
 const FFMPEG_RELEASE_BASE = 'https://github.com/eugeneware/ffmpeg-static/releases/latest/download';
 
-/** Static ffmpeg release asset for the current platform/arch, or null if none is published. */
 function ffmpegAssetName(): string | null {
   const assets: Record<string, string> = {
     'darwin/arm64': 'ffmpeg-darwin-arm64',
@@ -202,49 +367,28 @@ function printFfmpegPathHint(ui: UIService, binDir: string): void {
   }
 }
 
-/** iOS screen recording needs ffmpeg on the Appium machine (XCUITest encodes with it); Android
- * records on-device and needs nothing. Installs a static build into the Traceback data dir so
- * no brew/package manager is required. */
-async function ensureFfmpeg(ui: UIService, skipConfirm: boolean): Promise<void> {
+async function ensureFfmpeg(ui: UIService): Promise<void> {
   if (commandExists('ffmpeg')) {
     const version = execSync('ffmpeg --version', { encoding: 'utf-8' }).trim().split('\n')[0];
-    ui.success(`ffmpeg already installed (${version})`);
-    return;
-  }
-
-  const asset = ffmpegAssetName();
-  if (!asset) {
-    ui.warn(
-      `No prebuilt ffmpeg available for ${process.platform}/${process.arch} — install it manually so iOS runs can record video.`,
-    );
+    ui.success(`ffmpeg found on PATH (${chalk.dim(version?.slice(0, 30))}).`);
     return;
   }
 
   const binPath = ffmpegBinPath();
   const binDir = path.dirname(binPath);
   if (fs.existsSync(binPath)) {
-    ui.success(`ffmpeg already installed (${binPath})`);
+    ui.success(`ffmpeg is ready (${chalk.dim(binPath)}).`);
     printFfmpegPathHint(ui, binDir);
     return;
   }
 
-  ui.warn(
-    'ffmpeg not found — needed for iOS screen recordings (Android records on-device, no ffmpeg needed).',
-  );
-  if (!skipConfirm) {
-    const { confirm } = await import('@inquirer/prompts');
-    const install = await confirm({
-      message:
-        'Download a static ffmpeg build into the Traceback data dir (no brew/package manager needed)?',
-      default: true,
-    });
-    if (!install) {
-      ui.hint("Skipped. iOS runs will pass but won't include a screen recording.");
-      return;
-    }
+  const asset = ffmpegAssetName();
+  if (!asset) {
+    ui.warn('No prebuilt ffmpeg available for this platform architecture.');
+    return;
   }
 
-  ui.info('Downloading static ffmpeg...');
+  ui.info('Downloading standalone ffmpeg binary into Traceback data directory...');
   fs.mkdirSync(binDir, { recursive: true });
   try {
     const res = await fetch(`${FFMPEG_RELEASE_BASE}/${asset}`, {
@@ -253,85 +397,50 @@ async function ensureFfmpeg(ui: UIService, skipConfirm: boolean): Promise<void> 
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
     await fs.promises.writeFile(binPath, Buffer.from(await res.arrayBuffer()));
     if (process.platform !== 'win32') fs.chmodSync(binPath, 0o755);
+    ui.success(`ffmpeg downloaded and configured (${chalk.dim(binPath)}).`);
+    printFfmpegPathHint(ui, binDir);
   } catch (err) {
     ui.error(`ffmpeg download failed: ${err instanceof Error ? err.message : String(err)}`);
-    ui.hint('Retry `traceback setup` later, or install ffmpeg yourself.');
-    return;
+    ui.hint('You can install ffmpeg manually with Homebrew (`brew install ffmpeg`).');
   }
-
-  try {
-    const version = execSync(`"${binPath}" -version`, { encoding: 'utf-8' }).trim().split('\n')[0];
-    ui.success(`ffmpeg installed (${version})`);
-  } catch {
-    ui.error(`ffmpeg was downloaded to ${binPath} but couldn't run — try installing it manually.`);
-    return;
-  }
-  printFfmpegPathHint(ui, binDir);
 }
 
-/** Appium's own doctor treats a working JDK as a required (not optional) check for the
- * uiautomator2 driver — without one, `appium driver install` still succeeds, but a real session
- * fails later with a much less obvious Java error. Check-only, like adb/Xcode below: which JDK
- * install is right (brew, apt, Adoptium, ...) varies too much by platform to safely automate. */
 function checkJava(ui: UIService): void {
   try {
     const output = execSync('java -version 2>&1', { encoding: 'utf-8', timeout: 5000 }).trim();
     const version = output.split('\n')[0] || 'java';
-    ui.success(`Java found (${version})`);
+    ui.success(`Java JDK found (${chalk.dim(version)}).`);
   } catch {
-    ui.warn('Java not found — the Android (uiautomator2) driver needs a JDK to run.');
-    if (process.platform === 'darwin') {
-      ui.hint('Install one with `brew install openjdk@17` (brew prints the PATH/JAVA_HOME');
-      ui.hint('export commands it needs), or grab one from https://adoptium.net.');
-    } else if (process.platform === 'linux') {
-      ui.hint('Install one with your package manager (e.g. `apt install openjdk-17-jdk`),');
-      ui.hint('or grab one from https://adoptium.net.');
-    } else {
-      ui.hint('Install a JDK from https://adoptium.net and make sure `java` is on your PATH.');
-    }
+    ui.warn('Java JDK not found — Android uiautomator2 requires a JDK.');
+    ui.hint('Install via `brew install openjdk@17` or grab one from https://adoptium.net.');
   }
 }
 
 function checkAndroidSdk(ui: UIService): void {
   if (commandExists('adb')) {
-    ui.success('Android platform-tools (adb) found.');
-    return;
+    ui.success('Android platform-tools (adb) verified.');
+  } else {
+    ui.warn('adb not found on PATH — required for Android emulators/devices.');
+    ui.hint('Install Android Studio (https://developer.android.com/studio) or platform-tools.');
   }
-  ui.warn('adb not found — needed to run tests on Android emulators/devices.');
-  ui.hint('Install Android Studio (https://developer.android.com/studio) or the standalone');
-  ui.hint('platform-tools package, then make sure `adb` is on your PATH.');
 }
 
 function checkXcode(ui: UIService): void {
-  if (process.platform !== 'darwin') return; // iOS testing only exists on macOS
+  if (process.platform !== 'darwin') return;
   try {
-    // Not `xcrun --version` — that succeeds even when `xcode-select` points at the bare
-    // Command Line Tools, since xcrun itself resolves fine there; `simctl` (what iOS testing
-    // actually needs) only ships inside full Xcode.app's Developer directory, so checking it
-    // directly is the only way to catch the misconfigured-but-"found" case below.
     execSync('xcrun simctl list devices', { stdio: 'pipe', timeout: 5000 });
-    ui.success('Xcode Command Line Tools found.');
+    ui.success('Xcode Command Line Tools & iOS Simulator tools verified.');
   } catch {
-    // Xcode.app already installed but `xcode-select` still points at the bare Command Line
-    // Tools (which don't ship `simctl`) is a different problem than Xcode not being installed
-    // at all — `xcode-select --install` doesn't fix it (it only offers the bare CLT, not a
-    // path change), so that generic hint would send someone with Xcode already installed in
-    // circles.
     if (xcodeAppInstalled()) {
-      ui.warn(
-        'Xcode is installed, but `xcode-select` still points at the bare Command Line Tools.',
-      );
-      ui.hint('Fix it with: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer');
+      ui.warn('Xcode is installed, but `xcode-select` still points at bare Command Line Tools.');
+      ui.hint('Fix with: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer');
     } else {
-      ui.warn('Xcode Command Line Tools not found — needed to run tests on iOS simulators.');
-      ui.hint('Install them with `xcode-select --install`.');
+      ui.warn('Xcode Command Line Tools not found — required for iOS simulators.');
+      ui.hint('Install with: xcode-select --install');
     }
   }
 }
 
-/** Picks any available iOS Simulator device to build WebDriverAgent against — the compiled app
- * bundle this produces isn't destination-specific (see wda-prebuild.ts), so which one gets
- * picked here doesn't need to match whatever a real run later targets. */
 function pickWdaBuildDestination(): string | null {
   try {
     const raw = execSync('xcrun simctl list devices available --json', {
@@ -348,58 +457,36 @@ function pickWdaBuildDestination(): string | null {
       if (iphone) return iphone.udid;
     }
   } catch {
-    // Falls through to null below — treated the same as "no simulator available".
+    // ignore
   }
   return null;
 }
 
-/** Pre-builds WebDriverAgent once here instead of on someone's first real test run — see
- * appium.bridge.ts's console.log for the incident this exists to prevent (a perfectly healthy,
- * still-building WDA process getting killed mid-run because a multi-minute compile with nothing
- * on screen looked indistinguishable from a hang). Best-effort throughout: every failure path
- * just leaves that first-run cost where it already was, not a regression. */
-async function ensureWdaPrebuilt(ui: UIService, skipConfirm: boolean): Promise<void> {
-  if (process.platform !== 'darwin') return; // iOS testing only exists on macOS
+async function ensureWdaPrebuilt(ui: UIService): Promise<void> {
+  if (process.platform !== 'darwin') return;
 
   const projectPath = wdaProjectPath();
-  if (!projectPath) return; // xcuitest driver isn't installed -- nothing to build
+  if (!projectPath) return;
 
   if (wdaIsPrebuilt()) {
-    ui.success('WebDriverAgent already pre-built — iOS runs will skip the first-run compile.');
+    ui.success('WebDriverAgent is already pre-built for iOS Simulators.');
     return;
   }
 
   try {
     execSync('xcrun simctl list devices', { stdio: 'pipe', timeout: 5000 });
   } catch {
-    ui.warn("Skipping WebDriverAgent pre-build — Xcode/Simulator isn't usable yet (see above).");
-    ui.hint('Fix that, then run `traceback setup` again to pre-build it.');
+    ui.warn('Skipping WebDriverAgent pre-build — Xcode/Simulator is not yet configured.');
     return;
   }
 
   const udid = pickWdaBuildDestination();
   if (!udid) {
-    ui.warn('Skipping WebDriverAgent pre-build — no available iOS Simulator device found.');
-    ui.hint(
-      'Create one in Xcode (Window > Devices and Simulators), then run `traceback setup` again.',
-    );
+    ui.warn('Skipping WebDriverAgent pre-build — no iOS Simulator device detected.');
     return;
   }
 
-  if (!skipConfirm) {
-    const { confirm } = await import('@inquirer/prompts');
-    const install = await confirm({
-      message:
-        "Pre-build WebDriverAgent now (a few minutes, one-time) so it doesn't stall your first real iOS run?",
-      default: true,
-    });
-    if (!install) {
-      ui.hint('Skipped — the first real iOS run will build it instead (also a few minutes).');
-      return;
-    }
-  }
-
-  ui.info('Building WebDriverAgent via Xcode — this can take a few minutes...');
+  ui.info('Pre-building WebDriverAgent for iOS (this can take a couple minutes)...');
   const code = await runStreamed('xcodebuild', [
     'build-for-testing',
     '-project',
@@ -413,9 +500,8 @@ async function ensureWdaPrebuilt(ui: UIService, skipConfirm: boolean): Promise<v
   ]);
 
   if (code === 0 && wdaIsPrebuilt()) {
-    ui.success('WebDriverAgent pre-built — future iOS runs will skip the first-run compile.');
+    ui.success('WebDriverAgent pre-built successfully.');
   } else {
-    ui.error('WebDriverAgent pre-build failed — see the output above.');
-    ui.hint('iOS runs will fall back to building it on first use instead.');
+    ui.warn('WebDriverAgent pre-build did not complete; will build on demand during first run.');
   }
 }

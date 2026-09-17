@@ -10,6 +10,7 @@
 import type { Command } from 'commander';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { CliContext } from '../../types/context.js';
+import chalk from 'chalk';
 import type {
   MobileDevice,
   DeviceDetectionDiagnostics,
@@ -133,6 +134,12 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
           ctx.infra.ui.hint('Run `traceback workspaces` to select a valid workspace.');
           return;
         }
+        if (error.response?.status === 403) {
+          spinner.fail('Access denied (403)');
+          ctx.infra.ui.warn('You do not have access to the currently configured workspace.');
+          ctx.infra.ui.hint('Run `traceback workspaces` to select a workspace for your account.');
+          return;
+        }
         spinner.fail('Failed to fetch tests');
         throw error;
       }
@@ -142,29 +149,36 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
         return;
       }
 
-      // Step 3: Let the user pick a test
-      const testId = await select({
-        message: `Select a ${platform} test`,
-        choices: tests.map((t) => ({
-          name: `${t.name}${t.goal ? `  —  ${t.goal.slice(0, 50)}` : ''}`,
-          value: t.id,
-        })),
+      // Step 3: Let the user search and pick a test
+      const { search } = await import('@inquirer/prompts');
+      const testId = await search({
+        message: `Search or select a ${platform} test`,
+        source: async (input) => {
+          const term = (input || '').trim().toLowerCase();
+          const filtered = term
+            ? tests.filter(
+                (t) =>
+                  t.name.toLowerCase().includes(term) ||
+                  (t.goal && t.goal.toLowerCase().includes(term)),
+              )
+            : tests;
+
+          return filtered.map((t) => {
+            const statusBadge = t.status ? chalk.dim(` [${t.status}]`) : '';
+            const goalPreview = t.goal ? chalk.gray(`  —  ${t.goal.slice(0, 50)}`) : '';
+            return {
+              name: `${chalk.bold(t.name)}${statusBadge}${goalPreview}`,
+              value: t.id,
+            };
+          });
+        },
       });
 
       const selected = tests.find((t) => t.id === testId);
       if (!selected) return;
 
-      // Step 4: Run the selected test
-      // ── Web: environment (if applicable), then straight into a cloud run --
-      // no cloud/local/details menu in between. `runInCloud` itself asks "Watch this run
-      // live?" and streams events when the answer is yes. Local Chrome (CDP tunnel) and the
-      // static details view still exist (`runLocally`/`showDetails` below) for whatever picks
-      // them back up later -- they're just not reachable from this flow anymore.
+      // Step 4: Run the selected test locally (opens Chrome on the user's machine)
       const envs = Object.keys(selected.environments || {});
-      // A single-choice select prompt has nothing to actually decide -- it just makes the
-      // user press Enter through a list with one item in it, which reads as "did this even
-      // ask me anything?" rather than a real environment choice. Only prompt when there's
-      // more than one to pick between; with exactly one, use it directly and say so.
       let environment = envs[0] || 'production';
       if (envs.length > 1) {
         environment = await select({
@@ -176,7 +190,7 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
         ctx.infra.ui.hint(`Environment: ${environment}`);
       }
 
-      await runInCloud(ctx, workspaceId, testId, selected.name, environment);
+      await runLocally(ctx, workspaceId, testId, selected.name, environment);
     });
 }
 
@@ -233,7 +247,11 @@ async function runInCloud(
 
   try {
     ctx.infra.ui.hint('Press Ctrl+C to stop watching (the run keeps going either way).');
-    await watchRun(config.apiUrl, token.accessToken, runId, ctx.infra.ui, controller.signal);
+    await watchRun(config.apiUrl, token.accessToken, runId, ctx.infra.ui, controller.signal, {
+      testName,
+      environment,
+      targetName: 'Cloud Headless Browser',
+    });
   } finally {
     process.off('SIGINT', onSigint);
   }
@@ -262,37 +280,43 @@ export async function runLocally(
   const { launchChrome } = await import('../../infrastructure/browser/chrome.launcher.js');
   const { connectTunnel } = await import('../../infrastructure/tunnel/tunnel.client.js');
 
-  // Step 1: Launch Chrome with CDP enabled
-  const chromeSpinner = ctx.infra.ui.spinner('Launching Chrome...');
+  const token = await ctx.infra.auth.getToken();
+  if (!token) {
+    ctx.infra.ui.warn('Not authenticated. Run `traceback login` first.');
+    return;
+  }
+  const config = await ctx.infra.config.loadGlobalConfig();
+
+  // Step 1: Launch default or installed Chromium browser with CDP enabled
+  const launchSpinner = ctx.infra.ui.spinner('Launching browser with remote debugging...');
   let chrome;
   try {
     chrome = await launchChrome();
-    chromeSpinner.succeed(`Chrome launched (CDP: ${chrome.cdpUrl.slice(0, 40)}...)`);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
-  } catch (error: any) {
-    chromeSpinner.fail(`Failed to launch Chrome: ${error.message}`);
+    if (chrome.fallbackFrom) {
+      ctx.infra.ui.hint(
+        `Default browser (${chrome.fallbackFrom}) does not support CDP; using ${chrome.browserName}.`,
+      );
+    }
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    launchSpinner.fail(`Failed to launch browser: ${msg}`);
     return;
   }
 
   // Step 2: Connect tunnel to backend and advertise the CDP URL
-  const tunnelSpinner = ctx.infra.ui.spinner('Connecting tunnel...');
+  launchSpinner.setText(`Connecting CDP tunnel to Traceback Cloud...`);
   let tunnel;
   try {
-    const token = await ctx.infra.auth.getToken();
-    if (!token) throw new Error('Not authenticated');
-
-    const config = await ctx.infra.config.loadGlobalConfig();
     tunnel = await connectTunnel(config.apiUrl, token.accessToken, chrome.cdpUrl);
-    tunnelSpinner.succeed(`Tunnel connected (${tunnel.tunnelId.slice(0, 12)}...)`);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
-  } catch (error: any) {
-    tunnelSpinner.fail(`Tunnel failed: ${error.message}`);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    launchSpinner.fail(`Tunnel failed: ${msg}`);
     chrome.kill();
     return;
   }
 
   // Step 3: Dispatch the test run with the tunnel_id
-  const runSpinner = ctx.infra.ui.spinner(`Running "${testName}" locally...`);
+  launchSpinner.setText(`Dispatching test run "${testName}"...`);
   try {
     const result = await ctx.infra.api.post<{ run_id: string }>(
       `/api/v1/workspaces/${workspaceId}/tests/${testId}/run`,
@@ -302,28 +326,43 @@ export async function runLocally(
         tunnel_id: tunnel.tunnelId,
       },
     );
-    runSpinner.succeed(`Run started: ${result.data.run_id}`);
-    ctx.infra.ui.info('Watch the test run in your Chrome window.');
-    ctx.infra.ui.hint('Press Ctrl+C to stop.');
+    const runId = result.data.run_id;
+    launchSpinner.succeed(`Connected to Traceback Cloud (Run: ${chalk.cyan(runId)})`);
 
-    // Keep the process alive while the test runs.
-    // The backend controls Chrome via CDP through our tunnel.
-    await new Promise<void>((resolve) => {
-      process.on('SIGINT', () => {
-        ctx.infra.ui.info('\nStopping...');
-        resolve();
+    ctx.infra.ui.box(
+      `${chalk.hex('#6366F1').bold('🧪 ' + testName)}\n\n` +
+        `  ${chalk.dim('Run ID:')}      ${chalk.cyan(runId)}\n` +
+        `  ${chalk.dim('Environment:')} ${chalk.white(environment)}\n` +
+        `  ${chalk.dim('Target:')}      ${chalk.white(chrome.browserName)} ${chalk.dim('(Local CDP Tunnel)')}\n` +
+        `  ${chalk.dim('Controls:')}    ${chalk.dim('[q / Ctrl+C] Detach • [v] Toggle Reasoning')}`,
+      { title: 'Test Session', borderColor: '#6366F1' },
+    );
+
+    const { watchRun } = await import('../../infrastructure/socket/run-events.client.js');
+    const controller = new AbortController();
+    const onSigint = (): void => {
+      ctx.infra.ui.info('\nStopped watching (stopping local Chrome and tunnel).');
+      controller.abort();
+    };
+    process.on('SIGINT', onSigint);
+
+    try {
+      await watchRun(config.apiUrl, token.accessToken, runId, ctx.infra.ui, controller.signal, {
+        testName,
+        environment,
+        targetName: chrome.browserName,
       });
-      // Auto-resolve after 5 minutes (safety timeout)
-      setTimeout(resolve, 300_000);
-    });
+    } finally {
+      process.off('SIGINT', onSigint);
+    }
   } catch (error) {
-    runSpinner.fail('Failed to start local run');
+    launchSpinner.fail('Failed to start local run');
     throw error;
   } finally {
     // Step 4: Clean up — close tunnel and Chrome
     tunnel.close();
     chrome.kill();
-    ctx.infra.ui.info('Chrome and tunnel closed.');
+    ctx.infra.ui.info('Browser session and tunnel closed.');
   }
 }
 

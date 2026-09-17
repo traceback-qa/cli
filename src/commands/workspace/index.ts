@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import chalk from 'chalk';
 import type { getContext as GetContextFn } from '../../cli.js';
 
 type ContextGetter = typeof GetContextFn;
@@ -13,7 +14,7 @@ interface Workspace {
 export function registerWorkspaceCommands(program: Command, getContext: ContextGetter): void {
   program
     .command('workspaces')
-    .description('Select a workspace')
+    .description('List and switch active Traceback workspace')
     .action(async function (this: Command) {
       const ctx = getContext(this);
       if (!ctx) return;
@@ -49,8 +50,12 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
         message: 'Select a workspace',
         choices: workspaces.map((w) => {
           const id = w.workspace_id ?? w.id ?? '';
+          const isActive = id === currentId;
+          const planBadge = w.plan ? chalk.dim(` [${w.plan}]`) : '';
+          const statusBadge = isActive ? chalk.cyan.bold(' ● active') : '';
+
           return {
-            name: id === currentId ? `${w.name}  ← active` : w.name,
+            name: `${chalk.bold(w.name)}${planBadge}${statusBadge}`,
             value: id,
           };
         }),
@@ -59,6 +64,8 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
 
       await ctx.infra.config.setGlobalConfig({ workspaceId: answer });
       const selected = workspaces.find((w) => (w.workspace_id ?? w.id) === answer);
-      ctx.infra.ui.success(`Active workspace: ${selected?.name ?? answer}`);
+      ctx.infra.ui.success(
+        `Active workspace switched to: ${chalk.bold.cyan(selected?.name ?? answer)}`,
+      );
     });
 }
