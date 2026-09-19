@@ -17,6 +17,7 @@ export const UI_THEME = {
   dim: chalk.gray,
   bold: chalk.bold,
   cyan: chalk.cyan,
+  magenta: chalk.magenta,
 };
 
 export function createUIService(opts: UIOptions): UIService {
@@ -91,15 +92,31 @@ export function createUIService(opts: UIOptions): UIService {
 
     badge(
       label: string,
-      type: 'info' | 'success' | 'warn' | 'error' | 'brand' | 'dim' = 'info',
+      type:
+        | 'info'
+        | 'success'
+        | 'warn'
+        | 'error'
+        | 'brand'
+        | 'dim'
+        | 'passed'
+        | 'failed'
+        | 'running'
+        | 'queued' = 'info',
     ): string {
       switch (type) {
         case 'success':
+        case 'passed':
           return chalk.bgGreen.black.bold(` ${label} `);
         case 'error':
+        case 'failed':
           return chalk.bgRed.white.bold(` ${label} `);
         case 'warn':
           return chalk.bgYellow.black.bold(` ${label} `);
+        case 'running':
+          return chalk.bgCyan.black.bold(` ${label} `);
+        case 'queued':
+          return chalk.bgMagenta.white.bold(` ${label} `);
         case 'brand':
           return chalk.bgHex('#6366F1').white.bold(` ${label} `);
         case 'dim':
@@ -122,18 +139,40 @@ export function createUIService(opts: UIOptions): UIService {
       );
     },
 
-    errorCard(title: string, message: string, suggestions: string[] = []): void {
+    errorCard(
+      title: string,
+      message: string,
+      suggestions: string[] = [],
+      extraOpts?: { quickFix?: string; docsUrl?: string },
+    ): void {
       if (opts.silent) return;
       if (opts.json) {
-        console.error(JSON.stringify({ error: title, details: message, suggestions }));
+        console.error(
+          JSON.stringify({
+            error: title,
+            details: message,
+            suggestions,
+            quickFix: extraOpts?.quickFix,
+            docsUrl: extraOpts?.docsUrl,
+          }),
+        );
         return;
       }
 
       let content = `${UI_THEME.errorBold(title)}\n\n${chalk.white(message)}`;
+
+      if (extraOpts?.quickFix) {
+        content += `\n\n${chalk.bold('Quick Fix:')}\n  ${chalk.cyan('$')} ${chalk.bold(extraOpts.quickFix)}`;
+      }
+
       if (suggestions.length > 0) {
         content +=
-          `\n\n${chalk.bold('Troubleshooting / Suggestions:')}\n` +
+          `\n\n${chalk.bold('Suggestions:')}\n` +
           suggestions.map((s) => `  ${chalk.cyan('•')} ${s}`).join('\n');
+      }
+
+      if (extraOpts?.docsUrl) {
+        content += `\n\n${chalk.dim('Documentation:')} ${ui.link(extraOpts.docsUrl, extraOpts.docsUrl)}`;
       }
 
       console.error(
@@ -144,6 +183,100 @@ export function createUIService(opts: UIOptions): UIService {
           borderStyle: 'round',
         }),
       );
+    },
+
+    emptyState(
+      title: string,
+      description: string,
+      actions: Array<{ label: string; command: string }> = [],
+    ): void {
+      if (opts.json || opts.silent) return;
+      let content = `${chalk.bold(title)}\n\n${chalk.dim(description)}`;
+      if (actions.length > 0) {
+        content +=
+          `\n\n${chalk.bold('Quick actions:')}\n` +
+          actions
+            .map((a) => `  ${chalk.cyan('•')} ${a.label}: ${chalk.hex('#6366F1').bold(a.command)}`)
+            .join('\n');
+      }
+      maybeLog(
+        boxen(content, {
+          padding: 1,
+          margin: { top: 0, bottom: 1, left: 0, right: 0 },
+          borderColor: 'gray',
+          borderStyle: 'round',
+        }),
+      );
+    },
+
+    link(text: string, url: string): string {
+      if (opts.noColor) {
+        return text === url ? text : `${text} (${url})`;
+      }
+      return `\u001B]8;;${url}\u001B\\${chalk.cyan.underline(text)}\u001B]8;;\u001B\\`;
+    },
+
+    progressBar(current: number, total: number, width: number = 20): string {
+      const percentage = Math.min(100, Math.max(0, Math.round((current / (total || 1)) * 100)));
+      const filledLength = Math.round((width * percentage) / 100);
+      const emptyLength = Math.max(0, width - filledLength);
+      const bar =
+        chalk.hex('#6366F1')('█'.repeat(filledLength)) + chalk.gray('░'.repeat(emptyLength));
+      return `[${bar}] ${percentage}%`;
+    },
+
+    treeStart(title: string, subtitle?: string): void {
+      if (opts.json || opts.silent) return;
+      maybeLog(`${chalk.hex('#6366F1')('┌')}  ${chalk.bold(title)}`);
+      if (subtitle) {
+        maybeLog(`${chalk.hex('#6366F1')('│')}  ${chalk.dim(subtitle)}`);
+      }
+      maybeLog(chalk.hex('#6366F1')('│'));
+    },
+
+    treeStep(
+      stepNum: number | string,
+      title: string,
+      status: 'running' | 'success' | 'fail' | 'info' = 'info',
+      durationMs?: number,
+      detail?: string,
+    ): void {
+      if (opts.json || opts.silent) return;
+
+      let icon = chalk.cyan('◇');
+      let statusText = '';
+
+      if (status === 'success') {
+        icon = chalk.green('✔');
+      } else if (status === 'fail') {
+        icon = chalk.red('✖');
+      } else if (status === 'running') {
+        icon = chalk.yellow('▲');
+        statusText = chalk.yellow(' [running]');
+      }
+
+      const duration = durationMs !== undefined ? chalk.dim(` (${durationMs}ms)`) : '';
+      const prefix = chalk.dim(`[${stepNum}]`);
+      maybeLog(`${icon}  ${prefix} ${title}${duration}${statusText}`);
+
+      if (detail) {
+        maybeLog(`${chalk.hex('#6366F1')('│')}  ${chalk.dim(detail)}`);
+      }
+    },
+
+    treeAgent(message: string): void {
+      if (opts.json || opts.silent) return;
+      maybeLog(
+        `${chalk.hex('#6366F1')('│')}  ${chalk.dim('↳')} ${chalk.magenta.bold('AI Agent:')} ${chalk.italic(`"${message}"`)}`,
+      );
+    },
+
+    treeEnd(summary: string, success: boolean = true): void {
+      if (opts.json || opts.silent) return;
+      maybeLog(chalk.hex('#6366F1')('│'));
+      const statusIcon = success ? chalk.green.bold('✔') : chalk.red.bold('✖');
+      const text = success ? chalk.green.bold(summary) : chalk.red.bold(summary);
+      maybeLog(`${chalk.hex('#6366F1')('└')}  ${statusIcon} ${text}`);
     },
 
     table(
@@ -253,6 +386,22 @@ export function createUIService(opts: UIOptions): UIService {
       if (activeSpinner) {
         activeSpinner.stop();
         activeSpinner = null;
+      }
+    },
+
+    bell(): void {
+      if (opts.silent || opts.json || !opts.interactive) return;
+      process.stdout.write('\u0007');
+    },
+
+    copyToClipboard(text: string): boolean {
+      if (opts.silent || opts.json || !opts.interactive) return false;
+      try {
+        const base64 = Buffer.from(text).toString('base64');
+        process.stdout.write(`\x1b]52;c;${base64}\x07`);
+        return true;
+      } catch {
+        return false;
       }
     },
   };

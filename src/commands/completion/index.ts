@@ -1,6 +1,10 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import type { getContext as GetContextFn } from '../../cli.js';
+import type { UIService } from '../../infrastructure/ui/ui.types.js';
 
 type ContextGetter = typeof GetContextFn;
 
@@ -9,8 +13,13 @@ export function registerCompletionCommands(program: Command, getContext: Context
     .command('completion')
     .description('Generate and install shell completion scripts (zsh, bash, fish)')
     .argument('[shell]', 'Shell type: zsh, bash, fish')
-    .option('--install', 'Output installation command for your current shell')
-    .action(function (this: Command, shell: string | undefined, options: { install?: boolean }) {
+    .option('-i, --install', 'Automatically install completion hook into your shell profile')
+    .option('-y, --yes', 'Skip confirmation prompt when installing')
+    .action(async function (
+      this: Command,
+      shell: string | undefined,
+      options: { install?: boolean; yes?: boolean },
+    ) {
       const ctx = getContext(this);
       if (!ctx) return;
 
@@ -23,11 +32,17 @@ export function registerCompletionCommands(program: Command, getContext: Context
         return;
       }
 
-      if (options.install || !shell) {
+      if (options.install) {
+        await installShellCompletion(ctx, targetShell, options.yes ?? false);
+        return;
+      }
+
+      if (!shell) {
         ctx.infra.ui.box(
           `${chalk.bold.hex('#6366F1')('🐚 Traceback Shell Completion Setup')}\n\n` +
             `To enable tab completion in ${chalk.bold.cyan(targetShell)}, run:\n\n` +
-            getInstallInstruction(targetShell),
+            getInstallInstruction(targetShell) +
+            `\n\n${chalk.dim('Tip: Run `traceback completion --install` to automatically install it.')}`,
           { title: 'Shell Completion', borderColor: '#6366F1' },
         );
         return;
@@ -52,6 +67,61 @@ export function registerCompletionCommands(program: Command, getContext: Context
       // eslint-disable-next-line no-console
       console.log(generateCompletionScript(targetShell));
     });
+}
+
+async function installShellCompletion(
+  ctx: {
+    infra: { ui: UIService };
+    flags: { ci: boolean };
+  },
+  shell: string,
+  skipPrompt: boolean,
+): Promise<void> {
+  const ui = ctx.infra.ui;
+  const home = os.homedir();
+  let rcPath = '';
+  let evalLine = '';
+
+  if (shell === 'zsh') {
+    rcPath = path.join(home, '.zshrc');
+    evalLine = 'eval "$(traceback completion zsh)"';
+  } else if (shell === 'bash') {
+    rcPath = path.join(home, '.bashrc');
+    evalLine = 'eval "$(traceback completion bash)"';
+  } else if (shell === 'fish') {
+    const fishDir = path.join(home, '.config', 'fish', 'completions');
+    fs.mkdirSync(fishDir, { recursive: true });
+    const fishFile = path.join(fishDir, 'traceback.fish');
+    fs.writeFileSync(fishFile, generateCompletionScript('fish'), 'utf8');
+    ui.success(`Shell completion installed at ${fishFile}!`);
+    ui.hint('Open a new fish terminal to start using tab completion.');
+    return;
+  }
+
+  if (fs.existsSync(rcPath)) {
+    const existing = fs.readFileSync(rcPath, 'utf8');
+    if (existing.includes('traceback completion')) {
+      ui.success(`Shell completion is already installed in ${rcPath}.`);
+      return;
+    }
+  }
+
+  if (!skipPrompt && !ctx.flags.ci) {
+    const { confirm } = await import('@inquirer/prompts');
+    const confirmed = await confirm({
+      message: `Add Traceback completion hook to ${rcPath}?`,
+      default: true,
+    });
+    if (!confirmed) {
+      ui.hint('Installation cancelled.');
+      return;
+    }
+  }
+
+  const payload = `\n# Traceback CLI shell completion\n${evalLine}\n`;
+  fs.appendFileSync(rcPath, payload, 'utf8');
+  ui.success(`Shell completion added to ${rcPath}!`);
+  ui.hint(`Run \`source ${rcPath}\` or restart your terminal to activate.`);
 }
 
 function detectShell(): string {

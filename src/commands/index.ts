@@ -11,3 +11,4 @@ export { registerMobileCommands } from './mobile/index.js';
 export { registerSetupCommands } from './setup/index.js';
 export { registerSkillsCommands } from './skills/index.js';
 export { registerRunsCommands } from './runs/index.js';
+export { registerInitCommands } from './init/index.js';

@@ -68,6 +68,8 @@ export class TuiDashboard {
   private spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   private spinnerIndex = 0;
   private isActive = false;
+  private copiedToast = false;
+  private toastTimeout: NodeJS.Timeout | null = null;
   private onDetach?: () => void;
   private onOpenWeb?: () => void;
 
@@ -119,6 +121,11 @@ export class TuiDashboard {
       this.timerInterval = null;
     }
 
+    if (this.toastTimeout) {
+      clearTimeout(this.toastTimeout);
+      this.toastTimeout = null;
+    }
+
     process.stdout.removeListener('resize', this.render);
 
     if (process.stdin.isTTY && process.stdin.setRawMode) {
@@ -143,6 +150,17 @@ export class TuiDashboard {
       this.onDetach?.();
     } else if (key.toLowerCase() === 'o') {
       this.onOpenWeb?.();
+    } else if (key.toLowerCase() === 'c') {
+      const url = `https://app.traceback.dev/runs/${this.runId}`;
+      const base64 = Buffer.from(url).toString('base64');
+      process.stdout.write(`\x1b]52;c;${base64}\x07`);
+      this.copiedToast = true;
+      if (this.toastTimeout) clearTimeout(this.toastTimeout);
+      this.toastTimeout = setTimeout(() => {
+        this.copiedToast = false;
+        this.render();
+      }, 2000);
+      this.render();
     }
   };
 
@@ -371,7 +389,10 @@ export class TuiDashboard {
         chalk.hex('#6366F1')('┤'),
     );
 
-    const footerText = `  ${chalk.dim('Shortcuts:')} ${chalk.white.bold('[q]')} ${chalk.dim('Detach')}  ${chalk.dim('•')}  ${chalk.white.bold('[o]')} ${chalk.dim('Open Web')}  ${chalk.dim('•')}  ${chalk.white.bold('[Ctrl+C]')} ${chalk.dim('Stop')}`;
+    const toast = this.copiedToast
+      ? `  ${chalk.bgGreen.black.bold(' 📋 Link copied to clipboard! ')}`
+      : '';
+    const footerText = `  ${chalk.dim('Shortcuts:')} ${chalk.white.bold('[q]')} ${chalk.dim('Detach')}  ${chalk.dim('•')}  ${chalk.white.bold('[o]')} ${chalk.dim('Open Web')}  ${chalk.dim('•')}  ${chalk.white.bold('[c]')} ${chalk.dim('Copy Link')}  ${chalk.dim('•')}  ${chalk.white.bold('[Ctrl+C]')} ${chalk.dim('Stop')}${toast}`;
     lines.push(
       chalk.hex('#6366F1')('│') + padEndAnsi(footerText, termWidth - 2) + chalk.hex('#6366F1')('│'),
     );
