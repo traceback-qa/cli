@@ -74,7 +74,10 @@ export async function handleLogin(ctx: CliContext): Promise<void> {
   const spinner = ui.spinner('Waiting for browser authentication approval...');
 
   try {
-    await ctx.infra.auth.loginWithBrowser();
+    const token = await ctx.infra.auth.loginWithBrowser();
+    if (token?.workspaceId) {
+      await ctx.infra.config.setGlobalConfig({ workspaceId: token.workspaceId });
+    }
     spinner.succeed('Authentication successful!');
 
     const account = await ctx.infra.auth.getCurrentAccount();

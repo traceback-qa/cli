@@ -46,6 +46,14 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
     return;
   }
 
+  if (token.workspaceId && opts.workspaceId && token.workspaceId !== opts.workspaceId) {
+    ui.warn(
+      `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${opts.workspaceId}".`,
+    );
+    ui.hint('Run `traceback login` to authenticate with this workspace.');
+    return;
+  }
+
   const config = await configService.loadGlobalConfig();
   let bridge: AppiumSession | null = null;
 
@@ -108,6 +116,7 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
       testName: opts.goal,
       environment: 'mobile',
       targetName: `${opts.platform.toUpperCase()} (${opts.device.name})`,
+      workspaceId: opts.workspaceId,
     });
 
     if (interrupted) {

@@ -8,6 +8,7 @@
 
 import http from 'node:http';
 import { spawn, execSync, type ChildProcess } from 'node:child_process';
+import { enrichMobileEnv } from './sdk.detector.js';
 
 export const DEFAULT_APPIUM_URL = 'http://localhost:4723';
 export const DEFAULT_STARTUP_TIMEOUT_MS = 25_000;
@@ -25,6 +26,8 @@ export interface EnsureAppiumServerOptions {
   onStatus?: (message: string) => void;
   /** Timeout in ms to wait for the server to become ready (default: 25000) */
   startupTimeoutMs?: number;
+  /** Target platform ('android' or 'ios') to restrict which drivers Appium initializes */
+  platform?: 'android' | 'ios';
 }
 
 /** Check if a command is executable on the current system PATH. */
@@ -130,16 +133,27 @@ export async function ensureAppiumServer(
 
   opts?.onStatus?.(`Starting local Appium server on port ${port}...`);
 
+  // Enrich process.env with detected ANDROID_HOME and JAVA_HOME
+  enrichMobileEnv();
+
   // 4. Spawn Appium child process
   let stderrBuffer = '';
   let stdoutBuffer = '';
 
+  const driverArgs: string[] = [];
+  if (opts?.platform === 'android') {
+    driverArgs.push('--use-drivers', 'uiautomator2');
+  } else if (opts?.platform === 'ios') {
+    driverArgs.push('--use-drivers', 'xcuitest');
+  }
+
   const child: ChildProcess = spawn(
     'appium',
-    ['--port', String(port), '--log-level', 'warn', '--relaxed-security'],
+    ['--port', String(port), '--log-level', 'warn', '--relaxed-security', ...driverArgs],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
+      env: { ...process.env },
     },
   );
 

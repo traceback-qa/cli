@@ -93,7 +93,10 @@ async function runInitWizard(
 
     const loginSpinner = ui.spinner('Opening browser for authentication...');
     try {
-      await ctx.infra.auth.loginWithBrowser();
+      const token = await ctx.infra.auth.loginWithBrowser();
+      if (token?.workspaceId) {
+        await ctx.infra.config.setGlobalConfig({ workspaceId: token.workspaceId });
+      }
       loginSpinner.succeed('Authentication successful');
       isAuth = true;
     } catch {

@@ -197,7 +197,11 @@ async function showRunDetail(
 
   const testTitle = run.test_name || run.name || run.goal || 'Test Run';
   const duration = run.duration_seconds ? `${run.duration_seconds.toFixed(1)}s` : 'N/A';
-  const reportUrl = `https://traceback.dev/runs/${runId}`;
+  const config = await ctx.infra.config.loadGlobalConfig();
+  const reportUrl =
+    config.apiUrl?.includes('localhost') || config.apiUrl?.includes('127.0.0.1')
+      ? `http://localhost:3000/${workspaceId}/runs/${runId}`
+      : `https://traceback.dev/runs/${runId}`;
 
   ui.box(
     `${chalk.hex('#6366F1').bold('🧪 ' + testTitle)}\n\n` +

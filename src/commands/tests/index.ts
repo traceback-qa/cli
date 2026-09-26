@@ -87,8 +87,8 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
       const ctx = getContext(this);
       if (!ctx) return;
 
-      const isAuth = await ctx.infra.auth.isAuthenticated();
-      if (!isAuth) {
+      const token = await ctx.infra.auth.getToken();
+      if (!token) {
         ctx.infra.ui.warn('Not authenticated. Run `traceback login` first.');
         return;
       }
@@ -97,6 +97,14 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
       const workspaceId = config.workspaceId;
       if (!workspaceId) {
         ctx.infra.ui.warn('No workspace selected. Run `traceback workspaces` first.');
+        return;
+      }
+
+      if (token.workspaceId && token.workspaceId !== workspaceId) {
+        ctx.infra.ui.warn(
+          `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${workspaceId}".`,
+        );
+        ctx.infra.ui.hint('Run `traceback login` to authenticate with this workspace.');
         return;
       }
 
@@ -251,6 +259,7 @@ async function runInCloud(
       testName,
       environment,
       targetName: 'Cloud Headless Browser',
+      workspaceId,
     });
   } finally {
     process.off('SIGINT', onSigint);
@@ -351,6 +360,7 @@ export async function runLocally(
         testName,
         environment,
         targetName: chrome.browserName,
+        workspaceId,
       });
     } finally {
       process.off('SIGINT', onSigint);

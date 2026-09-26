@@ -20,6 +20,7 @@ import { spawn, type ChildProcess, execSync } from 'child_process';
 import fs from 'fs/promises';
 import { wdaDerivedDataPath, wdaIsPrebuilt } from './wda-prebuild.js';
 import { ensureAppiumServer } from './appium.server.js';
+import { enrichMobileEnv } from './sdk.detector.js';
 
 export interface AppiumBridgeOptions {
   /** Backend API base URL (e.g. http://localhost:8000/api/v1) */
@@ -55,12 +56,13 @@ export interface AppiumSession {
  *   4. Returns the session ID for use in run requests
  */
 export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<AppiumSession> {
+  enrichMobileEnv();
   const appiumUrl = opts.appiumUrl || 'http://localhost:4723';
   let recordingProcess: ChildProcess | null = null;
   const recordingPath = `/tmp/traceback_recording_${opts.deviceId}.mp4`;
 
   // Step 0: Ensure Appium server is running (auto-starts if needed)
-  const serverHandle = await ensureAppiumServer({ appiumUrl });
+  const serverHandle = await ensureAppiumServer({ appiumUrl, platform: opts.platform });
 
   try {
     // Step 1: Create an Appium session that attaches to the current foreground app.
@@ -342,6 +344,11 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
               // Delete any stale recording file
               await fs.unlink(recordingPath).catch(() => {});
 
+              // Also start Appium driver recording as fallback
+              fetchJson(`${appiumUrl}/session/${appiumSessionId}/appium/start_recording_screen`, {
+                method: 'POST',
+              }).catch(() => {});
+
               if (opts.platform === 'ios') {
                 recordingProcess = spawn('xcrun', [
                   'simctl',
@@ -353,10 +360,13 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
                 ]);
               } else {
                 // Android: record to device sdcard first
-                // We don't delete stale file on device for brevity, screenrecord overwrites by default usually, but we can rm it
-                execSync(
-                  `adb -s ${opts.deviceId} shell rm -f /sdcard/traceback_recording.mp4 || true`,
-                );
+                try {
+                  execSync(
+                    `adb -s ${opts.deviceId} shell "pkill -2 -f screenrecord; rm -f /sdcard/traceback_recording.mp4" || true`,
+                  );
+                } catch {
+                  // Ignore cleanup error
+                }
                 recordingProcess = spawn('adb', [
                   '-s',
                   opts.deviceId,
@@ -383,23 +393,31 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
           case 'stop_recording': {
             // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
             console.log('[Native] Stopping screen recording...');
+            if (opts.platform === 'android') {
+              try {
+                execSync(`adb -s ${opts.deviceId} shell pkill -2 -f screenrecord || true`);
+              } catch {
+                // Ignore pkill error
+              }
+            }
+
             if (recordingProcess) {
               // Send SIGINT so the recording finishes encoding properly
               recordingProcess.kill('SIGINT');
 
               // Wait for it to cleanly exit
               await new Promise<void>((resolve) => {
-                const timeout = setTimeout(resolve, 5000); // 5s fallback timeout
+                const timeout = setTimeout(resolve, 3000);
                 recordingProcess!.on('exit', () => {
                   clearTimeout(timeout);
                   resolve();
                 });
               });
               recordingProcess = null;
-            } else {
-              // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-              console.log('[Native] No recording process found');
             }
+
+            // Brief pause to ensure MP4 moov atom is flushed to disk
+            await new Promise((r) => setTimeout(r, 1000));
 
             try {
               if (opts.platform === 'android') {
@@ -408,19 +426,32 @@ export async function startAppiumBridge(opts: AppiumBridgeOptions): Promise<Appi
                   `adb -s ${opts.deviceId} pull /sdcard/traceback_recording.mp4 ${recordingPath}`,
                 );
                 execSync(
-                  `adb -s ${opts.deviceId} shell rm /sdcard/traceback_recording.mp4 || true`,
+                  `adb -s ${opts.deviceId} shell rm -f /sdcard/traceback_recording.mp4 || true`,
                 );
               }
 
               const videoBuffer = await fs.readFile(recordingPath);
-              result = { video_b64: videoBuffer.toString('base64') };
+              if (videoBuffer.length > 0) {
+                result = { video_b64: videoBuffer.toString('base64') };
+              } else {
+                throw new Error('Empty recording file');
+              }
 
               // Cleanup local file
               await fs.unlink(recordingPath).catch(() => {});
             } catch (e: unknown) {
-              // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
-              console.error('[Native] Error retrieving recording:', e);
-              result = { video_b64: '' };
+              // Try fallback to Appium stop_recording_screen
+              try {
+                const appiumRes = await fetchJson(
+                  `${appiumUrl}/session/${appiumSessionId}/appium/stop_recording_screen`,
+                  { method: 'POST' },
+                );
+                result = { video_b64: appiumRes?.value || '' };
+              } catch {
+                // eslint-disable-next-line no-console -- direct user-facing terminal output for live progress
+                console.error('[Native] Error retrieving recording:', e);
+                result = { video_b64: '' };
+              }
             }
 
             break;

@@ -51,7 +51,8 @@ interface RunReportEvent {
 }
 
 interface RunCompletedEvent {
-  final_status: string;
+  final_status?: string;
+  status?: string;
 }
 
 export interface WatchRunOptions {
@@ -59,6 +60,20 @@ export interface WatchRunOptions {
   environment?: string;
   targetName?: string;
   enableDashboard?: boolean;
+  workspaceId?: string;
+}
+
+function getReportUrl(apiBaseUrl: string, runId: string, workspaceId?: string): string {
+  if (process.env.TRACEBACK_APP_URL) {
+    const base = process.env.TRACEBACK_APP_URL.replace(/\/$/, '');
+    return workspaceId ? `${base}/${workspaceId}/runs/${runId}` : `${base}/runs/${runId}`;
+  }
+  if (apiBaseUrl.includes('localhost') || apiBaseUrl.includes('127.0.0.1')) {
+    return workspaceId
+      ? `http://localhost:3000/${workspaceId}/runs/${runId}`
+      : `http://localhost:3000/runs/${runId}`;
+  }
+  return `https://traceback.dev/runs/${runId}`;
 }
 
 /**
@@ -75,7 +90,7 @@ export async function watchRun(
   const socketUrl = apiBaseUrl.replace(/\/api\/v1$/, '');
   const socket: Socket = io(socketUrl, {
     path: '/socket.io',
-    transports: ['websocket'],
+    transports: ['polling', 'websocket'],
     auth: { token: authToken },
     query: { token: authToken },
     reconnection: true,
@@ -84,11 +99,7 @@ export async function watchRun(
     timeout: 30_000,
   });
 
-  const useDashboard =
-    options?.enableDashboard !== false &&
-    Boolean(process.stdout.isTTY) &&
-    !ui.isJsonMode() &&
-    !ui.isSilent();
+  const useDashboard = false;
 
   let dashboard: TuiDashboard | null = null;
 
@@ -333,13 +344,14 @@ export async function watchRun(
     });
 
     socket.on('run.completed', (data: RunCompletedEvent) => {
-      const status = data.final_status.toUpperCase();
+      const rawStatus = data.final_status || data.status || 'passed';
+      const status = rawStatus.toUpperCase();
       if (dashboard) {
         dashboard.setFinalStatus(status);
         // Let user see final dashboard state briefly before exiting
         setTimeout(() => {
           cleanup();
-          renderFinalSummary(ui, status, runId);
+          renderFinalSummary(ui, status, runId, apiBaseUrl, options?.workspaceId);
           finish();
         }, 1200);
       } else {
@@ -347,20 +359,27 @@ export async function watchRun(
           activeStepSpinner.stop();
           activeStepSpinner = null;
         }
-        renderFinalSummary(ui, status, runId);
+        renderFinalSummary(ui, status, runId, apiBaseUrl, options?.workspaceId);
         finish();
       }
     });
   });
 }
 
-function renderFinalSummary(ui: UIService, status: string, runId: string): void {
+function renderFinalSummary(
+  ui: UIService,
+  status: string,
+  runId: string,
+  apiBaseUrl: string,
+  workspaceId?: string,
+): void {
+  const reportUrl = getReportUrl(apiBaseUrl, runId, workspaceId);
   if (status === 'PASSED') {
     ui.box(
       `${chalk.green.bold('✔ TEST RUN PASSED')}\n\n` +
         `  ${chalk.dim('Run ID:')}  ${chalk.cyan(runId)}\n` +
         `  ${chalk.dim('Status:')}  ${ui.badge('PASSED', 'success')}\n` +
-        `  ${chalk.dim('Report:')}  ${chalk.white(`https://traceback.dev/runs/${runId}`)}`,
+        `  ${chalk.dim('Report:')}  ${chalk.white(reportUrl)}`,
       { title: 'Result', borderColor: 'green' },
     );
   } else {
@@ -368,7 +387,7 @@ function renderFinalSummary(ui: UIService, status: string, runId: string): void 
       `${chalk.red.bold('✖ TEST RUN FAILED')}\n\n` +
         `  ${chalk.dim('Run ID:')}  ${chalk.cyan(runId)}\n` +
         `  ${chalk.dim('Status:')}  ${ui.badge(status, 'error')}\n` +
-        `  ${chalk.dim('Report:')}  ${chalk.white(`https://traceback.dev/runs/${runId}`)}`,
+        `  ${chalk.dim('Report:')}  ${chalk.white(reportUrl)}`,
       { title: 'Result', borderColor: 'red' },
     );
   }

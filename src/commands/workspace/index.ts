@@ -67,5 +67,15 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
       ctx.infra.ui.success(
         `Active workspace switched to: ${chalk.bold.cyan(selected?.name ?? answer)}`,
       );
+
+      const token = await ctx.infra.auth.getToken();
+      if (token && token.workspaceId && token.workspaceId !== answer) {
+        ctx.infra.ui.warn(
+          `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}".`,
+        );
+        ctx.infra.ui.hint(
+          'Run `traceback login` to authenticate and generate a key for this workspace.',
+        );
+      }
     });
 }

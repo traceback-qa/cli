@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
 import { xcodeAppInstalled } from '../../infrastructure/mobile/device.detector.js';
+import { findAndroidSdk, findJavaJdk } from '../../infrastructure/mobile/sdk.detector.js';
 import type { DoctorService, DoctorServiceDeps, DoctorCheckResult } from './doctor.types.js';
 
 export function createDoctorService(deps: DoctorServiceDeps): DoctorService {
@@ -12,6 +13,7 @@ export function createDoctorService(deps: DoctorServiceDeps): DoctorService {
       results.push(await checkApiConnectivity(deps));
       results.push(await checkUpdates(deps));
       results.push(await checkLogsDir(deps));
+      results.push(await checkAndroidSdk());
       results.push(await checkJava());
       results.push(await checkXcode());
 
@@ -117,23 +119,44 @@ async function checkLogsDir(deps: DoctorServiceDeps): Promise<DoctorCheckResult>
   }
 }
 
+async function checkAndroidSdk(): Promise<DoctorCheckResult> {
+  const sdk = findAndroidSdk();
+  if (sdk) {
+    return {
+      name: 'Android platform-tools (adb)',
+      status: 'ok',
+      message: sdk.onPath ? 'Found on PATH' : `Found at ${sdk.sdkPath}`,
+    };
+  }
+  return {
+    name: 'Android platform-tools (adb)',
+    status: 'warning',
+    message: 'Android SDK / adb not found',
+    suggestion:
+      'Needed for Android testing. Install Android Studio or run `traceback setup` to configure.',
+  };
+}
+
 /** Appium's own doctor treats a working JDK as required (not optional) for the uiautomator2
  * driver — `traceback setup` checks this too (see setup/index.ts's checkJava), but `doctor` is
  * the thing setup itself tells people to re-run, so it needs to catch a JDK that was removed or
  * never installed independently of a setup run. */
 async function checkJava(): Promise<DoctorCheckResult> {
-  try {
-    const output = execSync('java -version 2>&1', { encoding: 'utf-8', timeout: 5000 }).trim();
-    return { name: 'Java (JDK)', status: 'ok', message: output.split('\n')[0] || 'Found' };
-  } catch {
+  const java = findJavaJdk();
+  if (java) {
     return {
       name: 'Java (JDK)',
-      status: 'warning',
-      message: 'Java not found',
-      suggestion:
-        'Needed by the Android (uiautomator2) driver. Run `traceback setup` for install instructions.',
+      status: 'ok',
+      message: java.onPath ? java.version || 'Found on PATH' : `Found at ${java.javaHome}`,
     };
   }
+  return {
+    name: 'Java (JDK)',
+    status: 'warning',
+    message: 'Java not found',
+    suggestion:
+      'Needed by the Android (uiautomator2) driver. Run `traceback setup` for install instructions.',
+  };
 }
 
 /** macOS only. `xcrun`/`simctl` fails identically whether Xcode was never installed or is

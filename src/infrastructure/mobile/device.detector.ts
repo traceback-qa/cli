@@ -15,8 +15,8 @@
 
 import { execSync } from 'child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { defaultAndroidHomeCandidates, findAndroidSdk, enrichMobileEnv } from './sdk.detector.js';
 
 export interface MobileDevice {
   /** Unique device identifier (serial for Android, UDID for iOS). */
@@ -47,29 +47,20 @@ export interface DeviceDetectionResult {
   diagnostics: DeviceDetectionDiagnostics;
 }
 
-/** Default SDK install locations `adb` isn't on PATH would still plausibly live under, per OS —
- * mirrors the fallback the backend's own `mobile_provisioning.py` (`_sdk_binary`) already uses,
- * so a dev/CI box set up for the backend and a fresh end-user machine behave the same way. */
-function defaultAndroidHomeCandidates(): string[] {
-  const home = os.homedir();
-  switch (process.platform) {
-    case 'darwin':
-      return [path.join(home, 'Library', 'Android', 'sdk')];
-    case 'win32':
-      return [
-        process.env.LOCALAPPDATA
-          ? path.join(process.env.LOCALAPPDATA, 'Android', 'Sdk')
-          : path.join(home, 'AppData', 'Local', 'Android', 'Sdk'),
-      ];
-    default:
-      return [path.join(home, 'Android', 'Sdk'), path.join(home, 'android-sdk')];
-  }
-}
-
 /** Resolves a real, runnable `adb` — bare `adb` on PATH first (the common case once a shell has
  * actually picked up the SDK's PATH entry), then `$ANDROID_HOME`/`$ANDROID_SDK_ROOT`, then the
  * well-known per-OS default install path. Returns null only if none of those actually run. */
 function resolveAdb(): string | null {
+  const sdk = findAndroidSdk();
+  if (sdk?.adbPath) {
+    try {
+      execSync(`"${sdk.adbPath}" version`, { stdio: 'pipe', timeout: 5000 });
+      return sdk.adbPath;
+    } catch {
+      // Continue to fallback candidates
+    }
+  }
+
   const adbBin = process.platform === 'win32' ? 'adb.exe' : 'adb';
   const candidates = [
     adbBin,
@@ -121,11 +112,22 @@ function detectAndroidDevices(): { devices: MobileDevice[]; toolFound: boolean }
       // Extract model name from the -l output (e.g. model:Pixel_7)
       const modelMatch = line.match(/model:(\S+)/);
       const modelName = modelMatch?.[1];
-      const name = modelName
-        ? modelName.replace(/_/g, ' ')
-        : id.startsWith('emulator')
-          ? `Android Emulator (${id})`
-          : `Android Device (${id})`;
+      let name: string;
+      if (modelName) {
+        const formatted = modelName.replace(/_/g, ' ');
+        if (id.startsWith('emulator')) {
+          name =
+            formatted.toLowerCase().includes('emulator') ||
+            formatted.toLowerCase().includes('pixel') ||
+            formatted.toLowerCase().includes('android')
+              ? formatted
+              : `Android Emulator (${formatted})`;
+        } else {
+          name = formatted;
+        }
+      } else {
+        name = id.startsWith('emulator') ? `Android Emulator (${id})` : `Android Device (${id})`;
+      }
 
       devices.push({
         id,
@@ -220,6 +222,7 @@ function detectIOSSimulators(): {
  * actionable message instead of always defaulting to "start an emulator".
  */
 export function detectDevices(): DeviceDetectionResult {
+  enrichMobileEnv();
   const android = detectAndroidDevices();
   const ios = detectIOSSimulators();
   return {
