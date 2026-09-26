@@ -12,3 +12,7 @@ export { registerSetupCommands } from './setup/index.js';
 export { registerSkillsCommands } from './skills/index.js';
 export { registerRunsCommands } from './runs/index.js';
 export { registerInitCommands } from './init/index.js';
+export { registerVerifyCommands } from './verify/index.js';
+export { registerExploreCommands } from './explore/index.js';
+export { registerAlignCommands } from './align/index.js';
+export { registerHealCommands } from './heal/index.js';

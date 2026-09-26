@@ -1,8 +1,13 @@
 /**
- * Init command — interactive project onboarding and AI agent setup wizard.
+ * Init command — interactive project onboarding and spec scaffolding wizard.
  *
- * Scans the local repository, resolves authentication & workspace context,
- * generates `traceback.config.json`, installs agent skills, and configures MCP servers.
+ * Scaffolds a clean `qa/` directory structure:
+ * - `qa/surface.yaml` (inferred project name, base URL patterns for preview/prod/local, ignore paths)
+ * - `qa/policy.yaml` (merge.block_on sacred, heal policies)
+ * - `qa/clauses/sample.md` (sample clause with YAML frontmatter & #sacred)
+ * - `qa/journeys/smoke.yaml` (sample smoke journey covering the clause)
+ *
+ * Also configures `traceback.config.json`, MCP servers, and agent skills.
  */
 
 import type { Command } from 'commander';
@@ -11,14 +16,9 @@ import path from 'node:path';
 import chalk from 'chalk';
 import type { getContext as GetContextFn } from '../../cli.js';
 import type { CliContext } from '../../types/context.js';
+import { SpecService } from '../../services/spec/index.js';
 
 type ContextGetter = typeof GetContextFn;
-
-interface ProjectDetection {
-  framework: string;
-  platform: 'web' | 'mobile' | 'universal';
-  suggestedName: string;
-}
 
 interface InitOptions {
   yes?: boolean;
@@ -26,6 +26,7 @@ interface InitOptions {
   agent?: string;
   mcp?: boolean;
   skills?: boolean;
+  force?: boolean;
 }
 
 interface WorkspaceItem {
@@ -37,9 +38,10 @@ interface WorkspaceItem {
 export function registerInitCommands(program: Command, getContext: ContextGetter): void {
   program
     .command('init')
-    .description('Initialize Traceback in your project repository (onboarding wizard)')
+    .description('Initialize Traceback QA and scaffold spec directory (qa/) in your repository')
     .option('-y, --yes', 'Accept detected defaults without prompting', false)
     .option('-w, --workspace <id>', 'Traceback workspace ID to link')
+    .option('-f, --force', 'Overwrite existing qa/ files if they exist', false)
     .option('-a, --agent <agent>', 'AI agent: cursor, claude, opencode, codex, all, none', 'auto')
     .option('--no-mcp', 'Skip MCP server configuration')
     .option('--no-skills', 'Skip AI agent skills installation')
@@ -57,100 +59,94 @@ async function runInitWizard(
 ): Promise<void> {
   const ui = ctx.infra.ui;
   const projectRoot = process.cwd();
+  const specService = new SpecService();
 
   ui.treeStart(
-    'Traceback Project Initialization',
-    'Connecting repository to Traceback AI platform',
+    'Traceback QA Specification & Project Setup',
+    'Scaffolding spec-driven quality plane in repository',
   );
 
-  // ── Step 1: Detect Project Framework & Platform ──────────────
-  const detection = detectProject(projectRoot);
+  // ── Step 1: Detect Project Framework & Stack ─────────────────
+  const detection = specService.detectFramework(projectRoot);
   ui.treeStep(
     1,
-    `Project: ${chalk.bold.white(detection.suggestedName)} (${chalk.cyan(detection.framework)})`,
+    `Project: ${chalk.bold.white(detection.suggestedName)} (${chalk.cyan(detection.framework)}) → Default URL: ${chalk.dim(detection.defaultBaseUrl)}`,
     'success',
   );
 
-  // ── Step 2: Authentication Check ─────────────────────────────
+  // ── Step 2: Scaffold qa/ Directory Hierarchy ─────────────────
+  const createdFiles = specService.scaffoldQa(projectRoot, {
+    framework: detection.framework,
+    name: detection.suggestedName,
+    baseUrl: detection.defaultBaseUrl,
+    force: options.force,
+  });
+
+  ui.treeStep(
+    2,
+    `Scaffolded QA specification hierarchy (${chalk.bold('qa/')})`,
+    'success',
+  );
+  for (const f of createdFiles) {
+    ui.hint(`Created ${chalk.green(path.relative(projectRoot, f))}`);
+  }
+
+  // ── Step 3: Authentication & Workspace Context ───────────────
   let isAuth = await ctx.infra.auth.isAuthenticated();
   if (!isAuth) {
-    ui.treeStep(2, 'Authentication: Not logged in', 'running');
-    if (ctx.flags.ci || (options.yes && !isAuth)) {
-      ui.error('Authentication required. Run `traceback login` first.');
-      return;
-    }
+    if (ctx.flags.ci || options.yes) {
+      ui.treeStep(3, 'Authentication: Skipped (CI / Non-interactive mode)', 'info');
+    } else {
+      ui.treeStep(3, 'Authentication: Not logged in', 'running');
+      const { confirm } = await import('@inquirer/prompts');
+      const loginNow = await confirm({
+        message: 'You are not logged in. Log in with your browser now?',
+        default: true,
+      });
 
-    const { confirm } = await import('@inquirer/prompts');
-    const loginNow = await confirm({
-      message: 'You are not logged in. Log in with your browser now?',
-      default: true,
-    });
-
-    if (!loginNow) {
-      ui.warn('Initialization aborted. Run `traceback login` and try again.');
-      return;
-    }
-
-    const loginSpinner = ui.spinner('Opening browser for authentication...');
-    try {
-      await ctx.infra.auth.loginWithBrowser();
-      loginSpinner.succeed('Authentication successful');
-      isAuth = true;
-    } catch {
-      loginSpinner.fail('Authentication failed');
-      ui.error('Could not authenticate. Please try `traceback login`.');
-      return;
-    }
-  }
-
-  const account = await ctx.infra.auth.getCurrentAccount();
-  const userDisplay = account?.email || account?.accountId || 'Authenticated';
-  ui.treeStep(2, `Authenticated as ${chalk.bold.white(userDisplay)}`, 'success');
-
-  // ── Step 3: Workspace Linking ────────────────────────────────
-  let selectedWorkspaceId = options.workspace;
-  const globalConfig = await ctx.infra.config.loadGlobalConfig();
-
-  if (!selectedWorkspaceId) {
-    selectedWorkspaceId = globalConfig.workspaceId;
-  }
-
-  if (!selectedWorkspaceId || (!options.yes && !ctx.flags.ci)) {
-    const wsSpinner = ui.spinner('Fetching workspaces...');
-    let workspaces: WorkspaceItem[] = [];
-    try {
-      const res = await ctx.infra.api.get<WorkspaceItem[]>('/api/v1/workspaces');
-      workspaces = res.data || [];
-      wsSpinner.stop();
-    } catch {
-      wsSpinner.fail('Could not fetch workspaces');
-    }
-
-    if (workspaces.length > 0) {
-      if (options.yes && workspaces[0]) {
-        selectedWorkspaceId = workspaces[0].id;
-      } else if (!ctx.flags.ci) {
-        const { select } = await import('@inquirer/prompts');
-        selectedWorkspaceId = await select({
-          message: 'Select the Traceback workspace for this project:',
-          choices: workspaces.map((w) => ({
-            name: `${chalk.bold(w.name)} ${chalk.dim(`(${w.id})`)}`,
-            value: w.id,
-          })),
-          default: selectedWorkspaceId || workspaces[0]?.id,
-        });
+      if (loginNow) {
+        const loginSpinner = ui.spinner('Opening browser for authentication...');
+        try {
+          await ctx.infra.auth.loginWithBrowser();
+          loginSpinner.succeed('Authentication successful');
+          isAuth = true;
+        } catch {
+          loginSpinner.fail('Authentication failed');
+        }
       }
     }
   }
 
-  if (selectedWorkspaceId) {
-    ui.treeStep(3, `Linked Workspace: ${chalk.bold.cyan(selectedWorkspaceId)}`, 'success');
-  } else {
-    ui.treeStep(
-      3,
-      'No workspace selected (can be linked later via `traceback workspaces`)',
-      'info',
-    );
+  let selectedWorkspaceId = options.workspace;
+  if (isAuth) {
+    const account = await ctx.infra.auth.getCurrentAccount();
+    const userDisplay = account?.email || account?.accountId || 'Authenticated';
+    ui.treeStep(3, `Authenticated as ${chalk.bold.white(userDisplay)}`, 'success');
+
+    const globalConfig = await ctx.infra.config.loadGlobalConfig();
+    if (!selectedWorkspaceId) {
+      selectedWorkspaceId = globalConfig.workspaceId;
+    }
+
+    if (!selectedWorkspaceId && !options.yes && !ctx.flags.ci) {
+      try {
+        const res = await ctx.infra.api.get<WorkspaceItem[]>('/api/v1/workspaces');
+        const workspaces = res.data || [];
+        if (workspaces.length > 0) {
+          const { select } = await import('@inquirer/prompts');
+          selectedWorkspaceId = await select({
+            message: 'Select the Traceback workspace for this project:',
+            choices: workspaces.map((w) => ({
+              name: `${chalk.bold(w.name)} ${chalk.dim(`(${w.id})`)}`,
+              value: w.id,
+            })),
+            default: workspaces[0]?.id,
+          });
+        }
+      } catch {
+        // Skip interactive prompt on error
+      }
+    }
   }
 
   // ── Step 4: Write Project Config (`traceback.config.json`) ────
@@ -173,8 +169,12 @@ async function runInitWizard(
     if (skillsCmd) {
       const initSub = skillsCmd.commands.find((c) => c.name() === 'init');
       if (initSub) {
-        await initSub.parseAsync(['node', 'traceback', 'skills', 'init', '-y']);
-        ui.treeStep(5, `Installed AI skills in ${chalk.bold('.traceback/skills/')}`, 'success');
+        try {
+          await initSub.parseAsync(['node', 'traceback', 'skills', 'init', '-y']);
+          ui.treeStep(5, `Installed AI skills in ${chalk.bold('.traceback/skills/')}`, 'success');
+        } catch {
+          ui.treeStep(5, 'AI skills ready', 'info');
+        }
       }
     }
   }
@@ -193,82 +193,19 @@ async function runInitWizard(
     }
   }
 
-  ui.treeEnd('Traceback successfully initialized!', true);
+  ui.treeEnd('Traceback QA successfully initialized!', true);
 
   // ── Step 7: Next Steps Action Box ────────────────────────────
   ui.emptyState(
-    '🚀 Your project is ready for AI test automation!',
+    '🚀 Your project is ready for Spec-Driven QA!',
     'Run any of the following commands to get started:',
     [
-      { label: 'Browse & run tests', command: 'traceback tests' },
-      {
-        label: 'Mobile verification',
-        command: 'traceback mobile verify --goal "Log in and check feed"',
-      },
-      { label: 'Environment check', command: 'traceback doctor' },
-      { label: 'Start MCP server', command: 'traceback mcp' },
+      { label: 'Verify local specs', command: 'traceback verify' },
+      { label: 'Explore & discover routes', command: 'traceback explore http://localhost:3000' },
+      { label: 'Check spec alignment on PR', command: 'traceback align' },
+      { label: 'Start MCP server for agents', command: 'traceback mcp' },
     ],
   );
-}
-
-function detectProject(projectRoot: string): ProjectDetection {
-  let framework = 'Generic Web / Mobile';
-  let platform: 'web' | 'mobile' | 'universal' = 'web';
-  let suggestedName = path.basename(projectRoot);
-
-  const pkgJsonPath = path.join(projectRoot, 'package.json');
-  if (fs.existsSync(pkgJsonPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
-      if (pkg.name) suggestedName = pkg.name;
-
-      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-      if (deps['next']) {
-        framework = 'Next.js';
-        platform = 'web';
-      } else if (deps['expo']) {
-        framework = 'Expo (React Native)';
-        platform = 'universal';
-      } else if (deps['react-native']) {
-        framework = 'React Native';
-        platform = 'mobile';
-      } else if (deps['vite']) {
-        framework = 'Vite';
-        platform = 'web';
-      } else if (deps['@remix-run/react']) {
-        framework = 'Remix';
-        platform = 'web';
-      } else if (deps['nuxt'] || deps['vue']) {
-        framework = 'Vue / Nuxt';
-        platform = 'web';
-      } else if (deps['svelte'] || deps['@sveltejs/kit']) {
-        framework = 'SvelteKit';
-        platform = 'web';
-      } else if (deps['react']) {
-        framework = 'React';
-        platform = 'web';
-      }
-    } catch {
-      // Ignore parse errors
-    }
-  } else if (fs.existsSync(path.join(projectRoot, 'pubspec.yaml'))) {
-    framework = 'Flutter';
-    platform = 'universal';
-  } else if (
-    fs.existsSync(path.join(projectRoot, 'Podfile')) ||
-    fs.existsSync(path.join(projectRoot, 'ios'))
-  ) {
-    framework = 'iOS Native';
-    platform = 'mobile';
-  } else if (
-    fs.existsSync(path.join(projectRoot, 'build.gradle')) ||
-    fs.existsSync(path.join(projectRoot, 'android'))
-  ) {
-    framework = 'Android Native';
-    platform = 'mobile';
-  }
-
-  return { framework, platform, suggestedName };
 }
 
 function configureMcpServers(projectRoot: string): string[] {
@@ -298,7 +235,7 @@ function configureMcpServers(projectRoot: string): string[] {
     }
   }
 
-  // 2. Claude Code MCP (.claude/mcp.json or root claude.json)
+  // 2. Claude Code MCP (.claude/mcp.json)
   const claudeDir = path.join(projectRoot, '.claude');
   if (fs.existsSync(claudeDir) || fs.existsSync(path.join(projectRoot, 'CLAUDE.md'))) {
     try {

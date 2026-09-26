@@ -20,6 +20,10 @@ import {
   registerSkillsCommands,
   registerRunsCommands,
   registerInitCommands,
+  registerVerifyCommands,
+  registerExploreCommands,
+  registerAlignCommands,
+  registerHealCommands,
 } from './commands/index.js';
 import type { CliContext } from './types/context.js';
 
@@ -41,9 +45,25 @@ function getContext(cmd: Command): CliContext | undefined {
 
 const COMMAND_GROUPS = [
   {
-    title: 'CORE COMMANDS',
+    title: 'SPEC-DRIVEN DEVELOPMENT (V2)',
     commands: [
-      { name: 'init', desc: 'Initialize Traceback onboarding in this repository' },
+      { name: 'init', desc: 'Scaffold qa/ spec hierarchy and initialize project' },
+      { name: 'verify', desc: 'Verify local or preview URL against qa/ specs' },
+      { name: 'explore', desc: 'Crawl target URL and auto-generate draft qa/ specs' },
+      { name: 'align', desc: 'Compare PR diff / Linear tickets with specs for coverage' },
+      { name: 'heal', desc: 'Safe auto-repair for broken locators in qa/**' },
+    ],
+  },
+  {
+    title: 'AGENT & MCP INTEGRATIONS',
+    commands: [
+      { name: 'mcp', desc: 'Start stdio MCP server for Cursor / Claude Code / Codex' },
+      { name: 'skills', desc: 'Install and manage Traceback agent skills' },
+    ],
+  },
+  {
+    title: 'CORE & AUTHENTICATION',
+    commands: [
       { name: 'login', desc: 'Authenticate with Traceback via browser' },
       { name: 'whoami', desc: 'Display currently authenticated account' },
       { name: 'workspaces', desc: 'List and switch active Traceback workspace' },
@@ -51,23 +71,11 @@ const COMMAND_GROUPS = [
     ],
   },
   {
-    title: 'TESTING & VERIFICATION',
+    title: 'TESTING & SYSTEM',
     commands: [
       { name: 'tests', desc: 'Browse, run, and watch web and mobile tests' },
       { name: 'mobile', desc: 'Goal-driven mobile app verification against emulators' },
       { name: 'runs', desc: 'Inspect past test runs and execution history' },
-    ],
-  },
-  {
-    title: 'AI & MCP INTEGRATIONS',
-    commands: [
-      { name: 'mcp', desc: 'Start Traceback MCP server for Claude/Cursor/Codex' },
-      { name: 'skills', desc: 'Install and manage Traceback agent skills' },
-    ],
-  },
-  {
-    title: 'SYSTEM & SETTINGS',
-    commands: [
       { name: 'doctor', desc: 'Run diagnostics on local setup and Appium' },
       { name: 'setup', desc: 'Install Appium and platform drivers' },
       { name: 'project', desc: 'Manage projects and test suites' },
@@ -84,8 +92,8 @@ async function main(): Promise<void> {
   program
     .name('traceback')
     .description(
-      chalk.hex('#6366F1').bold('Traceback CLI') +
-        ' — AI browser & mobile test automation from your terminal',
+      chalk.hex('#6366F1').bold('Traceback QA') +
+        ' — Spec-Driven AI Quality Plane from your terminal',
     )
     .version(BUILD_INFO.version, '-v, --version', 'Output the current version')
     .helpOption('-h, --help', 'Display help for command')
@@ -95,7 +103,7 @@ async function main(): Promise<void> {
   program.helpInformation = function (): string {
     const lines: string[] = [];
     lines.push(
-      `${chalk.hex('#6366F1').bold('Traceback CLI')} ${chalk.dim(`v${BUILD_INFO.version}`)} — AI browser & mobile test automation\n`,
+      `${chalk.hex('#6366F1').bold('Traceback QA')} ${chalk.dim(`v${BUILD_INFO.version}`)} — Spec-Driven AI Quality Plane\n`,
     );
     lines.push(`${chalk.bold('USAGE')}`);
     lines.push(
@@ -120,7 +128,7 @@ async function main(): Promise<void> {
     );
     lines.push(`  ${chalk.yellow('--json'.padEnd(16, ' '))} ${chalk.gray('Output pure JSON')}`);
     lines.push(
-      `  ${chalk.yellow('--ci'.padEnd(16, ' '))} ${chalk.gray('CI mode (non-interactive)')}`,
+      `  ${chalk.yellow('--ci'.padEnd(16, ' '))} ${chalk.gray('CI mode (non-interactive, annotations)')}`,
     );
     lines.push(`  ${chalk.yellow('--silent'.padEnd(16, ' '))} ${chalk.gray('Disable all output')}`);
     lines.push(
@@ -131,12 +139,12 @@ async function main(): Promise<void> {
     );
 
     lines.push(chalk.bold('EXAMPLES'));
-    lines.push(`  $ ${chalk.hex('#6366F1')('traceback')} ${chalk.cyan('login')}`);
-    lines.push(`  $ ${chalk.hex('#6366F1')('traceback')} ${chalk.cyan('tests')}`);
-    lines.push(
-      `  $ ${chalk.hex('#6366F1')('traceback')} ${chalk.cyan('mobile verify')} --goal "Verify checkout flow" --platform android`,
-    );
-    lines.push(`  $ ${chalk.hex('#6366F1')('traceback')} ${chalk.cyan('mcp')}\n`);
+    lines.push(`  $ ${chalk.hex('#6366F1')('npx @traceback/qa')} ${chalk.cyan('init')}`);
+    lines.push(`  $ ${chalk.hex('#6366F1')('npx @traceback/qa')} ${chalk.cyan('verify')} http://localhost:3000`);
+    lines.push(`  $ ${chalk.hex('#6366F1')('npx @traceback/qa')} ${chalk.cyan('explore')} http://localhost:3000`);
+    lines.push(`  $ ${chalk.hex('#6366F1')('npx @traceback/qa')} ${chalk.cyan('align')} --pr 142`);
+    lines.push(`  $ ${chalk.hex('#6366F1')('npx @traceback/qa')} ${chalk.cyan('heal')} --apply`);
+    lines.push(`  $ ${chalk.hex('#6366F1')('npx @traceback/qa')} ${chalk.cyan('mcp')}\n`);
 
     return lines.join('\n');
   };
@@ -170,6 +178,13 @@ async function main(): Promise<void> {
     }
   });
 
+  registerInitCommands(program, getContext);
+  registerVerifyCommands(program, getContext);
+  registerExploreCommands(program, getContext);
+  registerAlignCommands(program, getContext);
+  registerHealCommands(program, getContext);
+  registerMcpCommands(program, getContext);
+
   registerAuthCommands(program, getContext);
   registerWorkspaceCommands(program, getContext);
   registerTestCommands(program, getContext);
@@ -178,12 +193,10 @@ async function main(): Promise<void> {
   registerDoctorCommands(program, getContext);
   registerUpdateCommands(program, getContext);
   registerCompletionCommands(program, getContext);
-  registerMcpCommands(program, getContext);
   registerMobileCommands(program, getContext);
   registerSetupCommands(program, getContext);
   registerSkillsCommands(program, getContext);
   registerRunsCommands(program, getContext);
-  registerInitCommands(program, getContext);
 
   program
     .command('login')
@@ -241,26 +254,27 @@ async function launchInteractiveHome(program: Command): Promise<void> {
     : chalk.dim('None selected (run `traceback workspaces`)');
 
   ui.box(
-    `${chalk.hex('#6366F1').bold('Traceback AI Testing Platform')}  ${authBadge}\n\n` +
+    `${chalk.hex('#6366F1').bold('Traceback QA Platform (V2)')}  ${authBadge}\n\n` +
       `  ${chalk.dim('User:')}        ${chalk.white(userLabel)}\n` +
       `  ${chalk.dim('Workspace:')}   ${wsLabel}\n` +
       `  ${chalk.dim('API Host:')}    ${chalk.gray(config.apiUrl || 'https://api.traceback.dev')}`,
-    { title: 'Welcome to Traceback', borderColor: '#6366F1' },
+    { title: 'Welcome to Traceback QA', borderColor: '#6366F1' },
   );
 
   const { select } = await import('@inquirer/prompts');
   const action = await select({
     message: 'What would you like to do?',
     choices: [
-      { name: '⚡  Initialize Traceback in this Repository (Init)', value: 'init' },
-      { name: '🧪  Browse & Run Tests (Web & Mobile)', value: 'tests' },
+      { name: '⚡  Initialize QA Hierarchy (Init)', value: 'init' },
+      { name: '🔍  Verify Specs against Local/Preview (Verify)', value: 'verify' },
+      { name: '🧭  Explore URL & Auto-generate Specs (Explore)', value: 'explore http://localhost:3000' },
+      { name: '📐  Check Spec Alignment on PR (Align)', value: 'align' },
+      { name: '🩹  Heal Broken Locators (Heal)', value: 'heal' },
+      { name: '🤖  Start MCP Server (Cursor / Claude Code)', value: 'mcp' },
+      { name: '🧪  Browse & Run Legacy Tests', value: 'tests' },
       { name: '📋  Inspect Past Test Runs History', value: 'runs' },
       { name: '📱  Mobile Verification (Appium)', value: 'mobile' },
-      { name: '🏢  Switch Active Workspace', value: 'workspaces' },
       { name: '🩺  Run System Diagnostics (Doctor)', value: 'doctor' },
-      { name: '🤖  Start MCP Server (Claude Code / Cursor)', value: 'mcp' },
-      { name: '🔧  Configure Mobile Dependencies (Setup)', value: 'setup' },
-      { name: '👤  View Account Profile', value: 'whoami' },
       { name: '📖  Show All Commands & Help', value: 'help' },
       { name: chalk.dim('🚪  Exit'), value: 'exit' },
     ],
