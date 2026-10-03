@@ -4,10 +4,13 @@ import type { getContext as GetContextFn } from '../../cli.js';
 
 type ContextGetter = typeof GetContextFn;
 
+import type { StoredToken } from '../../infrastructure/auth/auth.types.js';
+
 interface Workspace {
   workspace_id?: string;
   id?: string;
   name: string;
+  slug?: string;
   plan?: string;
 }
 
@@ -70,6 +73,46 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
 
       const token = await ctx.infra.auth.getToken();
       if (token && token.workspaceId && token.workspaceId !== answer) {
+        const keySpinner = ctx.infra.ui.spinner(
+          `Configuring access key for ${selected?.name ?? answer}...`,
+        );
+        try {
+          const keyRes = await ctx.infra.api.post<{
+            api_key_id: string;
+            raw_key: string;
+          }>('/api/v1/auth/api-keys', {
+            workspace_id: answer,
+            name: `CLI — ${selected?.name ?? answer}`,
+            scopes: [
+              'tests:read',
+              'tests:write',
+              'runs:read',
+              'runs:execute',
+              'test_run:*',
+              'scenario:*',
+              'project:*',
+            ],
+          });
+
+          if (keyRes.data?.raw_key) {
+            const newToken: StoredToken = {
+              ...token,
+              accessToken: keyRes.data.raw_key,
+              workspaceId: answer,
+              workspaceSlug: selected?.slug || selected?.name || answer,
+              issuedAt: Date.now(),
+            };
+            await ctx.infra.authStore.set(newToken);
+            ctx.infra.api.setAuthToken(newToken.accessToken);
+            keySpinner.succeed(
+              `Session authenticated for ${chalk.bold.cyan(selected?.name ?? answer)}.`,
+            );
+            return;
+          }
+        } catch {
+          keySpinner.stop();
+        }
+
         ctx.infra.ui.warn(
           `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}".`,
         );

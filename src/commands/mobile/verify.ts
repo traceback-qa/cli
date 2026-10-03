@@ -39,7 +39,7 @@ export interface MobileVerifyOptions {
 
 /** Run one natural-language verification through the persistent Socket.IO path. */
 export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions): Promise<void> {
-  const { api, auth, config: configService, ui } = ctx.infra;
+  const { api, auth, authStore, config: configService, ui } = ctx.infra;
   const token = await auth.getToken();
   if (!token) {
     ui.error('Not authenticated. Run `traceback login` first.');
@@ -47,11 +47,45 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
   }
 
   if (token.workspaceId && opts.workspaceId && token.workspaceId !== opts.workspaceId) {
-    ui.warn(
-      `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${opts.workspaceId}".`,
-    );
-    ui.hint('Run `traceback login` to authenticate with this workspace.');
-    return;
+    try {
+      const keyRes = await api.post<{
+        api_key_id: string;
+        raw_key: string;
+      }>('/api/v1/auth/api-keys', {
+        workspace_id: opts.workspaceId,
+        name: `CLI — ${opts.workspaceId}`,
+        scopes: [
+          'tests:read',
+          'tests:write',
+          'runs:read',
+          'runs:execute',
+          'test_run:*',
+          'scenario:*',
+          'project:*',
+        ],
+      });
+
+      if (keyRes.data?.raw_key) {
+        const newToken = {
+          ...token,
+          accessToken: keyRes.data.raw_key,
+          workspaceId: opts.workspaceId,
+          issuedAt: Date.now(),
+        };
+        await authStore.set(newToken);
+        api.setAuthToken(newToken.accessToken);
+        token.accessToken = newToken.accessToken;
+        token.workspaceId = newToken.workspaceId;
+      } else {
+        throw new Error('No key returned');
+      }
+    } catch {
+      ui.warn(
+        `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${opts.workspaceId}".`,
+      );
+      ui.hint('Run `traceback login` to authenticate with this workspace.');
+      return;
+    }
   }
 
   const config = await configService.loadGlobalConfig();

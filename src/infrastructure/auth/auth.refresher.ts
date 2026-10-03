@@ -2,6 +2,8 @@ import type { StoredToken, AuthService, AuthStore } from './auth.types.js';
 import type { ApiClient } from '../api/api.types.js';
 import type { Logger } from '../logger/logger.types.js';
 
+import type { ConfigService } from '../config/config.types.js';
+
 interface CliLoginResponse {
   device_code: string;
   user_code: string;
@@ -23,6 +25,7 @@ export function createAuthService(
   apiClient: ApiClient,
   authStore: AuthStore,
   logger: Logger,
+  configService?: ConfigService,
 ): AuthService {
   return {
     async loginWithBrowser(): Promise<StoredToken> {
@@ -31,17 +34,30 @@ export function createAuthService(
       const session = await apiClient.post<CliLoginResponse>('/api/v1/auth/cli/login');
 
       const { device_code, user_code, verification_url } = session.data;
+      let finalUrl = verification_url;
+
+      if (configService) {
+        try {
+          const config = await configService.loadGlobalConfig();
+          if (config.workspaceId) {
+            finalUrl = `${verification_url}&workspace=${encodeURIComponent(config.workspaceId)}`;
+          }
+        } catch {
+          // ignore config load errors
+        }
+      }
+
       logger.debug(`User code: ${user_code}`);
-      logger.debug(`Verification URL: ${verification_url}`);
+      logger.debug(`Verification URL: ${finalUrl}`);
 
       // Step 2: Print the user code and open the browser
       // eslint-disable-next-line no-console -- direct user-facing terminal output for the login flow
-      console.log(`\n  Copy this code: ${user_code}\n  Or open: ${verification_url}\n`);
+      console.log(`\n  Copy this code: ${user_code}\n  Or open: ${finalUrl}\n`);
 
       const { exec } = await import('child_process');
       const platform = process.platform;
       const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
-      exec(`${cmd} "${verification_url}"`);
+      exec(`${cmd} "${finalUrl}"`);
 
       // Step 3: Poll until the user approves or timeout
       const pollDeadline = Date.now() + POLL_TIMEOUT_MS;

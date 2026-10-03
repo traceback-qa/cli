@@ -101,11 +101,43 @@ export function registerTestCommands(program: Command, getContext: ContextGetter
       }
 
       if (token.workspaceId && token.workspaceId !== workspaceId) {
-        ctx.infra.ui.warn(
-          `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${workspaceId}".`,
-        );
-        ctx.infra.ui.hint('Run `traceback login` to authenticate with this workspace.');
-        return;
+        try {
+          const keyRes = await ctx.infra.api.post<{
+            api_key_id: string;
+            raw_key: string;
+          }>('/api/v1/auth/api-keys', {
+            workspace_id: workspaceId,
+            name: `CLI — ${workspaceId}`,
+            scopes: [
+              'tests:read',
+              'tests:write',
+              'runs:read',
+              'runs:execute',
+              'test_run:*',
+              'scenario:*',
+              'project:*',
+            ],
+          });
+
+          if (keyRes.data?.raw_key) {
+            const newToken = {
+              ...token,
+              accessToken: keyRes.data.raw_key,
+              workspaceId,
+              issuedAt: Date.now(),
+            };
+            await ctx.infra.authStore.set(newToken);
+            ctx.infra.api.setAuthToken(newToken.accessToken);
+          } else {
+            throw new Error('No key returned');
+          }
+        } catch {
+          ctx.infra.ui.warn(
+            `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${workspaceId}".`,
+          );
+          ctx.infra.ui.hint('Run `traceback login` to authenticate with this workspace.');
+          return;
+        }
       }
 
       // Step 1: Ask what type of tests to browse
