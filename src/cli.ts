@@ -53,6 +53,7 @@ const COMMAND_GROUPS = [
   {
     title: 'TESTING & VERIFICATION',
     commands: [
+      { name: 'connect', desc: 'Connect machine as a test execution bridge for web dashboard' },
       { name: 'tests', desc: 'Browse, run, and watch web and mobile tests' },
       { name: 'mobile', desc: 'Goal-driven mobile app verification against emulators' },
       { name: 'runs', desc: 'Inspect past test runs and execution history' },
@@ -184,6 +185,23 @@ async function main(): Promise<void> {
   registerSkillsCommands(program, getContext);
   registerRunsCommands(program, getContext);
   registerInitCommands(program, getContext);
+
+  program
+    .command('connect')
+    .description('Connect local machine as an execution bridge for web dashboard')
+    .option('--workspace <id>', 'Workspace ID to connect to')
+    .option('--appium-url <url>', 'Local Appium server URL')
+    .action(async function (this: Command, options) {
+      const ctx = getContext(this);
+      if (!ctx) return;
+
+      const { createRequireAuthMiddleware } = await import('./middleware/require-auth.js');
+      const requireAuth = createRequireAuthMiddleware(ctx);
+      await requireAuth();
+
+      const { runMobileConnect } = await import('./commands/mobile/connect.js');
+      await runMobileConnect(ctx, options);
+    });
 
   program
     .command('login')

@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import type { CliContext } from '../../types/context.js';
 import { createRequireAuthMiddleware } from '../../middleware/require-auth.js';
 import { registerMobileDevCommands } from './dev.js';
+import { registerMobileConnectCommand } from './connect.js';
 import { resolveVerifyDevice } from '../../infrastructure/mobile/device.picker.js';
 import { runMobileVerify, DEFAULT_APPIUM_URL } from './verify.js';
 
@@ -11,6 +12,9 @@ export function registerMobileCommands(program: Command, getContext: ContextGett
   const mobile = program
     .command('mobile')
     .description('Mobile app verification — cloud-driven AI testing against a connected device');
+
+  // Register mobile connect daemon
+  registerMobileConnectCommand(mobile, getContext);
 
   // `dev`/`test` — Mode 1: a persistent cloud emulator + live-reload tunnel, registered as
   // siblings of `verify` below rather than folded into it (different lifecycle entirely: one
