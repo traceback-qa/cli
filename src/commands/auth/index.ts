@@ -70,32 +70,56 @@ export function registerAuthCommands(program: Command, getContext: ContextGetter
 
 export async function handleLogin(ctx: CliContext): Promise<void> {
   const ui = ctx.infra.ui;
-  ui.info('Opening browser for authentication...');
-  const spinner = ui.spinner('Waiting for browser authentication approval...');
+  ui.info('Starting browser authentication...');
+  let spinner: ReturnType<typeof ui.spinner> | undefined;
 
   try {
-    const token = await ctx.infra.auth.loginWithBrowser();
+    const token = await ctx.infra.auth.loginWithBrowser({
+      onCode: ({ userCode, url, browserOpened }) => {
+        ui.info(
+          browserOpened
+            ? `Your browser should open. Confirm this code: ${chalk.bold.white(userCode)}`
+            : `Could not open a browser. Open ${chalk.cyan(url)} and confirm code ${chalk.bold.white(userCode)}`,
+        );
+        if (browserOpened) ui.info(`If it did not, open: ${chalk.cyan(url)}`);
+        spinner = ui.spinner('Waiting for browser authentication approval...');
+      },
+    });
     if (token?.workspaceId) {
       await ctx.infra.config.setGlobalConfig({ workspaceId: token.workspaceId });
     }
-    spinner.succeed('Authentication successful!');
+    spinner?.succeed('Authentication successful!');
 
     const account = await ctx.infra.auth.getCurrentAccount();
     if (account) {
       ui.success(`Logged in as ${chalk.bold.white(account.email || account.accountId)}`);
     }
   } catch (error) {
-    spinner.fail('Authentication failed.');
+    spinner?.fail('Authentication failed.');
     throw error;
   }
 }
 
 async function showAuthProfile(ctx: CliContext, isJson?: boolean): Promise<void> {
   const ui = ctx.infra.ui;
-  const isAuth = await ctx.infra.auth.isAuthenticated();
+  const session = await ctx.infra.auth.verifySession();
   const config = await ctx.infra.config.loadGlobalConfig();
 
-  if (!isAuth) {
+  if (session.state === 'invalid') {
+    if (isJson || ui.isJsonMode()) {
+      ui.renderJson({ authenticated: false, reason: 'invalid_or_revoked' });
+      return;
+    }
+    ui.box(
+      `${chalk.red.bold('✖ Session no longer valid')}\n\n` +
+        `  The stored API key was rejected (revoked or deleted).\n\n` +
+        `  Run ${chalk.cyan.bold('traceback auth login')} to sign in again.`,
+      { title: 'Authentication', borderColor: 'red' },
+    );
+    return;
+  }
+
+  if (session.state === 'none') {
     if (isJson || ui.isJsonMode()) {
       ui.renderJson({ authenticated: false });
       return;
@@ -110,13 +134,15 @@ async function showAuthProfile(ctx: CliContext, isJson?: boolean): Promise<void>
     return;
   }
 
-  const account = await ctx.infra.auth.getCurrentAccount();
+  const account = session.account;
+  const unverified = session.state === 'unverified';
   const workspaceId = config.workspaceId || 'None (run `traceback workspaces`)';
   const apiUrl = config.apiUrl || 'https://api.traceback.dev';
 
   if (isJson || ui.isJsonMode()) {
     ui.renderJson({
       authenticated: true,
+      verified: !unverified,
       account: account || null,
       workspaceId: config.workspaceId || null,
       apiUrl,
@@ -126,7 +152,9 @@ async function showAuthProfile(ctx: CliContext, isJson?: boolean): Promise<void>
 
   const userEmail = account?.email || 'Authenticated User';
   const accountId = account?.accountId ? ` (${chalk.dim(account.accountId)})` : '';
-  const statusBadge = ui.badge('ACTIVE SESSION', 'success');
+  const statusBadge = unverified
+    ? ui.badge('UNVERIFIED (API unreachable)', 'warn')
+    : ui.badge('ACTIVE SESSION', 'success');
 
   ui.box(
     `${chalk.bold.hex('#6366F1')('👤 Account Profile')}\n\n` +

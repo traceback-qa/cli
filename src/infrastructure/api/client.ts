@@ -48,6 +48,13 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     },
     async (error: AxiosError) => {
       getLogger()?.debug(`API error: ${String(error.response?.status)} ${error.config?.url}`);
+      const sentToken = Boolean(error.config?.headers?.['Authorization']);
+      const isDeviceFlow = String(error.config?.url).includes('/auth/cli/');
+      if (error.response?.status === 401 && sentToken && !isDeviceFlow) {
+        // Preserve the axios error (callers inspect response.status) but add a clear hint.
+        error.message =
+          'Your Traceback session is no longer valid (the API key may have been revoked). Run `traceback auth login` to sign in again.';
+      }
       return await Promise.reject(error);
     },
   );
