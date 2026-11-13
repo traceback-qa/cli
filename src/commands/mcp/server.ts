@@ -68,7 +68,7 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
       if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace shape not modeled client-side
-        const res = await api.get<any>(`/api/v1/workspaces/${workspace_id}`);
+        const res = await api.get<any>(`/api/v1/workspaces/${encodeURIComponent(workspace_id)}`);
         activeWorkspaceId = workspace_id;
         activeWorkspaceName = res.data?.name || workspace_id;
         return {

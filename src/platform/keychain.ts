@@ -1,20 +1,25 @@
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 
 function getMachineId(): string {
   try {
     switch (process.platform) {
       case 'darwin': {
-        const id = execSync(
-          "ioreg -rd1 -c IOPlatformExpertDevice | awk -F'\"' '/IOPlatformUUID/ {print $4}'",
-          {
-            encoding: 'utf-8',
-          },
-        ).trim();
-        return id;
+        const out = execFileSync('ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], {
+          encoding: 'utf-8',
+          timeout: 5_000,
+        });
+        const match = out.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+        return match?.[1]?.trim() || os.hostname();
       }
       case 'linux': {
-        const id = execSync('cat /etc/machine-id', { encoding: 'utf-8' }).trim();
-        return id || execSync('cat /var/lib/dbus/machine-id', { encoding: 'utf-8' }).trim();
+        for (const candidate of ['/etc/machine-id', '/var/lib/dbus/machine-id']) {
+          if (fs.existsSync(candidate)) {
+            const id = fs.readFileSync(candidate, 'utf-8').trim();
+            if (id) return id;
+          }
+        }
+        return os.hostname();
       }
       case 'win32': {
         return process.env.COMPUTERNAME ?? 'windows-machine';
@@ -116,19 +121,10 @@ export function keychainSupported(): boolean {
 
 export function keychainSet(account: string, secret: string): boolean {
   if (process.platform === 'darwin') {
-    // The secret is briefly visible in this process's argv; it is hex/base64 only.
-    return (
-      run('security', [
-        'add-generic-password',
-        '-U',
-        '-s',
-        KEYCHAIN_SERVICE,
-        '-a',
-        account,
-        '-w',
-        secret,
-      ]) !== null
-    );
+    // Pass via `security -i` stdin so the secret never appears in process argv (`ps`).
+    const escapedSecret = secret.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const cmdLine = `add-generic-password -U -s "${KEYCHAIN_SERVICE}" -a "${account}" -w "${escapedSecret}"\n`;
+    return run('security', ['-i'], cmdLine) !== null;
   }
   if (process.platform === 'linux' && keychainSupported()) {
     return (

@@ -127,15 +127,17 @@ export function configureCloudMcp(options?: {
     try {
       const configDir = path.dirname(client.configPath);
       if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
+        fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
       }
 
       let parsedConfig: { mcpServers?: Record<string, unknown> } = {};
       if (fs.existsSync(client.configPath)) {
+        const raw = fs.readFileSync(client.configPath, 'utf-8');
         try {
-          const raw = fs.readFileSync(client.configPath, 'utf-8');
           parsedConfig = JSON.parse(raw);
         } catch {
+          const backupPath = `${client.configPath}.bak.${Date.now()}`;
+          fs.writeFileSync(backupPath, raw, { encoding: 'utf-8', mode: 0o600 });
           parsedConfig = {};
         }
       }
@@ -146,7 +148,12 @@ export function configureCloudMcp(options?: {
 
       parsedConfig.mcpServers['traceback'] = tracebackServerConfig;
 
-      fs.writeFileSync(client.configPath, JSON.stringify(parsedConfig, null, 2) + '\n', 'utf-8');
+      const tmpPath = `${client.configPath}.tmp.${process.pid}.${Date.now()}`;
+      fs.writeFileSync(tmpPath, JSON.stringify(parsedConfig, null, 2) + '\n', {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+      fs.renameSync(tmpPath, client.configPath);
       results.push({
         clientName: client.name,
         configPath: client.configPath,

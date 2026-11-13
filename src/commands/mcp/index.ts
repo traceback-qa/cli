@@ -26,14 +26,19 @@ export function registerMcpCommands(program: Command, getContext: ContextGetter)
       'Install Traceback Cloud MCP endpoint into Cursor, Claude Desktop, Windsurf, and VS Code',
     )
     .option('-y, --yes', 'Skip confirmation prompt', false)
-    .action(async function (this: Command) {
+    .option(
+      '--with-token',
+      'Embed a static Bearer token in IDE config instead of using browser OAuth',
+      false,
+    )
+    .action(async function (this: Command, options: { yes?: boolean; withToken?: boolean }) {
       const ctx = getContext(this);
       if (!ctx) return;
       const ui = ctx.infra.ui;
 
       ui.banner('Traceback MCP Installer', 'AI Agent & IDE Auto-Configurator');
 
-      const token = await ctx.infra.auth.getToken();
+      const token = options.withToken ? await ctx.infra.auth.getToken() : null;
       const config = await ctx.infra.config.loadGlobalConfig();
       const apiUrl = config.apiUrl;
 
@@ -63,9 +68,13 @@ export function registerMcpCommands(program: Command, getContext: ContextGetter)
       }
 
       ui.hint('');
-      if (!token?.accessToken) {
+      if (options.withToken && !token?.accessToken) {
         ui.warn(
-          'Note: No active login session found. Run `traceback login` to authenticate your MCP calls.',
+          'Note: No active login session found. Run `traceback login` or connect via OAuth in your IDE.',
+        );
+      } else if (!options.withToken) {
+        ui.info(
+          'Configured for OAuth — your AI IDE will prompt you to sign in via Traceback when connecting.',
         );
       }
 
