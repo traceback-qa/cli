@@ -27,7 +27,7 @@ export function registerUpdateCommands(program: Command, getContext: ContextGett
               `  Current: ${result.current}\n` +
               `  Latest:  ${result.latest}\n` +
               `  Type:    ${result.type}\n\n` +
-              `Run \`npm install -g traceback@latest\` to update.`,
+              `Run \`npm install -g @tracebackai/cli@latest\` to update.`,
             { title: 'Update Available' },
           );
         } else {

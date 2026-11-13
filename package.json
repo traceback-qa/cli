@@ -2,7 +2,8 @@
   "name": "@tracebackai/cli",
   "version": "1.0.2",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "description": "Run and watch Traceback AI browser/mobile tests from your terminal",
   "keywords": [
@@ -25,19 +26,29 @@
   "license": "MIT",
   "author": "Traceback Team",
   "type": "module",
-  "main": "./dist/cli.cjs",
-  "module": "./dist/cli.js",
-  "types": "./dist/cli.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
   "bin": {
     "traceback": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
+  "sideEffects": false,
+  "packageManager": "pnpm@9.14.0",
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "start": "node dist/cli.mjs",
+    "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ tests/",
     "lint:fix": "eslint src/ tests/ --fix",
@@ -46,7 +57,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "postinstall": "husky install",
+    "pack:check": "pnpm build && npm pack --dry-run",
+    "prepare": "husky",
     "prepublishOnly": "pnpm build"
   },
   "engines": {

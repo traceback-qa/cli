@@ -1,63 +1,86 @@
-import type { StoredToken, AuthService, AuthStore } from './auth.types.js';
+import type { StoredToken, AuthService, AuthStore, SessionStatus } from './auth.types.js';
 import type { ApiClient } from '../api/api.types.js';
 import type { Logger } from '../logger/logger.types.js';
+import type { ConfigService } from '../config/config.types.js';
+import { openUrl } from '../../platform/open-url.js';
 
 interface CliLoginResponse {
   device_code: string;
   user_code: string;
   verification_url: string;
   expires_in: number;
+  interval?: number;
 }
 
 interface CliTokenResponse {
   status: string;
   api_key: string;
+  api_key_id?: string;
   workspace_id: string;
   workspace_slug: string;
 }
 
-const POLL_INTERVAL_MS = 1500;
+const DEFAULT_POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 300_000; // 5 minutes
+const MAX_CONSECUTIVE_POLL_ERRORS = 5;
+
+function statusOf(error: unknown): number | undefined {
+  return (error as { response?: { status?: number } })?.response?.status;
+}
 
 export function createAuthService(
   apiClient: ApiClient,
   authStore: AuthStore,
   logger: Logger,
+  configService?: ConfigService,
 ): AuthService {
   return {
-    async loginWithBrowser(): Promise<StoredToken> {
-      // Step 1: Initiate device authorization
+    async loginWithBrowser(opts = {}): Promise<StoredToken> {
       logger.debug('Starting CLI device authorization...');
       const session = await apiClient.post<CliLoginResponse>('/api/v1/auth/cli/login');
 
       const { device_code, user_code, verification_url } = session.data;
+      const pollIntervalMs = session.data.interval
+        ? Math.max(session.data.interval * 1000, DEFAULT_POLL_INTERVAL_MS)
+        : DEFAULT_POLL_INTERVAL_MS;
+
+      let finalUrl = verification_url;
+      if (configService) {
+        try {
+          const config = await configService.loadGlobalConfig();
+          if (config.workspaceId) {
+            const u = new URL(verification_url);
+            u.searchParams.set('workspace', config.workspaceId);
+            finalUrl = u.toString();
+          }
+        } catch {
+          // ignore config load / URL errors
+        }
+      }
+
       logger.debug(`User code: ${user_code}`);
-      logger.debug(`Verification URL: ${verification_url}`);
+      logger.debug(`Verification URL: ${finalUrl}`);
 
-      // Step 2: Print the user code and open the browser
-      // eslint-disable-next-line no-console -- direct user-facing terminal output for the login flow
-      console.log(`\n  Copy this code: ${user_code}\n  Or open: ${verification_url}\n`);
+      const browserOpened = await openUrl(finalUrl);
+      opts.onCode?.({ userCode: user_code, url: finalUrl, browserOpened });
 
-      const { exec } = await import('child_process');
-      const platform = process.platform;
-      const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
-      exec(`${cmd} "${verification_url}"`);
-
-      // Step 3: Poll until the user approves or timeout
       const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
+      let consecutiveErrors = 0;
 
       while (Date.now() < pollDeadline) {
-        await sleep(POLL_INTERVAL_MS);
+        await sleep(pollIntervalMs);
 
         try {
           const result = await apiClient.post<CliTokenResponse>('/api/v1/auth/cli/token', {
             device_code,
           });
+          consecutiveErrors = 0;
 
           const data = result.data;
           if (data?.status === 'completed' && data?.api_key) {
             const token: StoredToken = {
               accessToken: data.api_key,
+              apiKeyId: data.api_key_id,
               workspaceId: data.workspace_id,
               workspaceSlug: data.workspace_slug,
               issuedAt: Date.now(),
@@ -68,27 +91,40 @@ export function createAuthService(
             logger.debug('Login successful');
             return token;
           }
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
-        } catch (error: any) {
-          const status = error?.response?.status;
+        } catch (error: unknown) {
+          const status = statusOf(error);
           // 202 = still pending, keep polling
-          if (status === 202) continue;
-          // 403 = rejected, 409 = already consumed — stop immediately
+          if (status === 202) {
+            consecutiveErrors = 0;
+            continue;
+          }
           if (status === 403 || status === 409) {
             throw new Error(
               'Login was rejected or the session was already consumed. Run `traceback login` to try again.',
             );
           }
-          // 410 = session expired, stop immediately
           if (status === 410) {
             throw new Error('Login session expired. Run `traceback login` to try again.');
           }
-          // 404 = invalid device code (shouldn't happen normally)
           if (status === 404) {
             throw new Error('Login session invalid. Please try again.');
           }
-          // Other errors — might be transient, keep polling
-          logger.debug(`Poll error: ${error?.message}`);
+          if (status === 429) {
+            // Rate limited: back off but keep the session alive.
+            await sleep(pollIntervalMs * 2);
+            continue;
+          }
+          // Anything else (5xx, network, unexpected 4xx): tolerate a few blips, then fail loudly.
+          consecutiveErrors++;
+          const message = error instanceof Error ? error.message : String(error);
+          logger.debug(
+            `Poll error (${consecutiveErrors}/${MAX_CONSECUTIVE_POLL_ERRORS}): ${message}`,
+          );
+          if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+            throw new Error(
+              `Could not reach Traceback while waiting for approval (${message}). Check your connection and run \`traceback login\` again.`,
+            );
+          }
         }
       }
 
@@ -97,12 +133,19 @@ export function createAuthService(
 
     async logout(): Promise<void> {
       const token = await authStore.get();
-      // API keys don't have a revoke-by-token-id endpoint —
-      // the user can revoke keys from the dashboard.
-      // We just clear the local store.
-      if (token) {
-        logger.debug('Clearing local auth token');
+
+      // Best-effort server-side revoke so a leaked/stale key stops working.
+      if (token?.apiKeyId) {
+        try {
+          apiClient.setAuthToken(token.accessToken);
+          await apiClient.delete(`/api/v1/auth/api-keys/${encodeURIComponent(token.apiKeyId)}`);
+          logger.debug('Revoked API key on server');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.debug(`Could not revoke API key server-side: ${message}`);
+        }
       }
+
       apiClient.setAuthToken(null);
       await authStore.delete();
       logger.debug('Logged out');
@@ -117,14 +160,10 @@ export function createAuthService(
       return token !== null;
     },
 
-    async getCurrentAccount(): Promise<{
-      email: string;
-      accountId: string;
-    } | null> {
+    async verifySession(): Promise<SessionStatus> {
       const token = await authStore.get();
-      if (!token) return null;
+      if (!token) return { state: 'none' };
 
-      // Try to fetch the user profile from the API
       try {
         const result = await apiClient.get<{
           email: string;
@@ -132,16 +171,28 @@ export function createAuthService(
           full_name: string;
         }>('/api/v1/auth/me');
         return {
-          email: result.data.email,
-          accountId: result.data.user_id,
+          state: 'valid',
+          account: { email: result.data.email, accountId: result.data.user_id },
         };
-      } catch {
-        // Fall back to what we have stored locally
+      } catch (error) {
+        const status = statusOf(error);
+        if (status === 401 || status === 403) return { state: 'invalid' };
         return {
-          email: token.email ?? token.workspaceSlug,
-          accountId: token.workspaceId,
+          state: 'unverified',
+          account: {
+            email: token.email ?? token.workspaceSlug,
+            accountId: token.workspaceId,
+          },
         };
       }
+    },
+
+    async getCurrentAccount(): Promise<{
+      email: string;
+      accountId: string;
+    } | null> {
+      const status = await this.verifySession();
+      return status.state === 'valid' || status.state === 'unverified' ? status.account : null;
     },
   };
 }

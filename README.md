@@ -62,16 +62,25 @@ traceback tests          # browse and run a test, live
 | `traceback workspaces`                         | Select the active workspace                                                        |
 | `traceback tests`                              | Browse and run a web or mobile test, with live streaming                           |
 | `traceback mobile verify`                      | Verify a mobile app against a natural-language goal on a connected device/emulator |
-| `traceback setup`                              | Install Appium and the drivers `mobile verify` needs                               |
+| `traceback setup`                              | Install Appium, drivers, SDKs, and auto-configure Cloud MCP in Cursor/Claude       |
 | `traceback project list\|get\|delete`          | Manage projects                                                                    |
 | `traceback agent list`                         | List agents                                                                        |
 | `traceback config get\|set\|list\|reset`       | Manage local CLI configuration                                                     |
 | `traceback doctor`                             | Diagnose your local Traceback setup                                                |
-| `traceback mcp`                                | Start the MCP server for AI agent integrations                                     |
+| `traceback mcp`                                | Start or install the MCP server for AI agent integrations (Cursor, Claude)         |
 | `traceback completion [shell]`                 | Print a shell completion script (bash, zsh, fish, powershell)                      |
 | `traceback update`                             | Check for a newer CLI version                                                      |
 
 Run `traceback <command> --help` for a command's full options.
+
+### `traceback setup`
+
+```sh
+traceback setup                        # Interactive platform selector, 1-click SDK & Cloud MCP installer
+traceback setup --platform android -y  # Fast headless Android setup
+traceback setup --quick                # Skips long optional steps like WDA pre-build
+traceback mcp install                  # Auto-configure Cloud MCP endpoint in Cursor & Claude Desktop
+```
 
 ### `traceback mobile verify`
 

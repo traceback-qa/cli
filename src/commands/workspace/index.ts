@@ -1,19 +1,23 @@
 import type { Command } from 'commander';
+import chalk from 'chalk';
 import type { getContext as GetContextFn } from '../../cli.js';
 
 type ContextGetter = typeof GetContextFn;
+
+import type { StoredToken } from '../../infrastructure/auth/auth.types.js';
 
 interface Workspace {
   workspace_id?: string;
   id?: string;
   name: string;
+  slug?: string;
   plan?: string;
 }
 
 export function registerWorkspaceCommands(program: Command, getContext: ContextGetter): void {
   program
     .command('workspaces')
-    .description('Select a workspace')
+    .description('List and switch active Traceback workspace')
     .action(async function (this: Command) {
       const ctx = getContext(this);
       if (!ctx) return;
@@ -49,8 +53,12 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
         message: 'Select a workspace',
         choices: workspaces.map((w) => {
           const id = w.workspace_id ?? w.id ?? '';
+          const isActive = id === currentId;
+          const planBadge = w.plan ? chalk.dim(` [${w.plan}]`) : '';
+          const statusBadge = isActive ? chalk.cyan.bold(' ● active') : '';
+
           return {
-            name: id === currentId ? `${w.name}  ← active` : w.name,
+            name: `${chalk.bold(w.name)}${planBadge}${statusBadge}`,
             value: id,
           };
         }),
@@ -59,6 +67,58 @@ export function registerWorkspaceCommands(program: Command, getContext: ContextG
 
       await ctx.infra.config.setGlobalConfig({ workspaceId: answer });
       const selected = workspaces.find((w) => (w.workspace_id ?? w.id) === answer);
-      ctx.infra.ui.success(`Active workspace: ${selected?.name ?? answer}`);
+      ctx.infra.ui.success(
+        `Active workspace switched to: ${chalk.bold.cyan(selected?.name ?? answer)}`,
+      );
+
+      const token = await ctx.infra.auth.getToken();
+      if (token && token.workspaceId && token.workspaceId !== answer) {
+        const keySpinner = ctx.infra.ui.spinner(
+          `Configuring access key for ${selected?.name ?? answer}...`,
+        );
+        try {
+          const keyRes = await ctx.infra.api.post<{
+            api_key_id: string;
+            raw_key: string;
+          }>('/api/v1/auth/api-keys', {
+            workspace_id: answer,
+            name: `CLI — ${selected?.name ?? answer}`,
+            scopes: [
+              'tests:read',
+              'tests:write',
+              'runs:read',
+              'runs:execute',
+              'test_run:*',
+              'scenario:*',
+              'project:*',
+            ],
+          });
+
+          if (keyRes.data?.raw_key) {
+            const newToken: StoredToken = {
+              ...token,
+              accessToken: keyRes.data.raw_key,
+              workspaceId: answer,
+              workspaceSlug: selected?.slug || selected?.name || answer,
+              issuedAt: Date.now(),
+            };
+            await ctx.infra.authStore.set(newToken);
+            ctx.infra.api.setAuthToken(newToken.accessToken);
+            keySpinner.succeed(
+              `Session authenticated for ${chalk.bold.cyan(selected?.name ?? answer)}.`,
+            );
+            return;
+          }
+        } catch {
+          keySpinner.stop();
+        }
+
+        ctx.infra.ui.warn(
+          `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}".`,
+        );
+        ctx.infra.ui.hint(
+          'Run `traceback login` to authenticate and generate a key for this workspace.',
+        );
+      }
     });
 }

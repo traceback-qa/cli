@@ -39,11 +39,53 @@ export interface MobileVerifyOptions {
 
 /** Run one natural-language verification through the persistent Socket.IO path. */
 export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions): Promise<void> {
-  const { api, auth, config: configService, ui } = ctx.infra;
+  const { api, auth, authStore, config: configService, ui } = ctx.infra;
   const token = await auth.getToken();
   if (!token) {
     ui.error('Not authenticated. Run `traceback login` first.');
     return;
+  }
+
+  if (token.workspaceId && opts.workspaceId && token.workspaceId !== opts.workspaceId) {
+    try {
+      const keyRes = await api.post<{
+        api_key_id: string;
+        raw_key: string;
+      }>('/api/v1/auth/api-keys', {
+        workspace_id: opts.workspaceId,
+        name: `CLI — ${opts.workspaceId}`,
+        scopes: [
+          'tests:read',
+          'tests:write',
+          'runs:read',
+          'runs:execute',
+          'test_run:*',
+          'scenario:*',
+          'project:*',
+        ],
+      });
+
+      if (keyRes.data?.raw_key) {
+        const newToken = {
+          ...token,
+          accessToken: keyRes.data.raw_key,
+          workspaceId: opts.workspaceId,
+          issuedAt: Date.now(),
+        };
+        await authStore.set(newToken);
+        api.setAuthToken(newToken.accessToken);
+        token.accessToken = newToken.accessToken;
+        token.workspaceId = newToken.workspaceId;
+      } else {
+        throw new Error('No key returned');
+      }
+    } catch {
+      ui.warn(
+        `Your active session token is scoped to workspace "${token.workspaceSlug || token.workspaceId}", but active workspace is "${opts.workspaceId}".`,
+      );
+      ui.hint('Run `traceback login` to authenticate with this workspace.');
+      return;
+    }
   }
 
   const config = await configService.loadGlobalConfig();
@@ -104,9 +146,12 @@ export async function runMobileVerify(ctx: CliContext, opts: MobileVerifyOptions
       return;
     }
 
-    ui.info(`\nRunning: "${opts.goal.slice(0, 100)}${opts.goal.length > 100 ? '...' : ''}"\n`);
-    ui.hint('Agent decisions and Appium actions stream below. Press Ctrl+C to stop.');
-    await watchRun(config.apiUrl, token.accessToken, runId, ui, controller.signal);
+    await watchRun(config.apiUrl, token.accessToken, runId, ui, controller.signal, {
+      testName: opts.goal,
+      environment: 'mobile',
+      targetName: `${opts.platform.toUpperCase()} (${opts.device.name})`,
+      workspaceId: opts.workspaceId,
+    });
 
     if (interrupted) {
       ui.warn('Mobile run stopped. The Appium session has been closed.');

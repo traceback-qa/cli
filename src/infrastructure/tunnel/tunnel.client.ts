@@ -38,9 +38,15 @@ export async function connectTunnel(
   cdpUrl: string,
 ): Promise<TunnelConnection> {
   // Build WebSocket URL with token as query param.
-  // e.g. http://localhost:8000/api/v1 → ws://localhost:8000/api/v1/tunnel/connect?token=tb_xxx
+  // e.g. http://localhost:8000 or http://localhost:8000/api/v1 → ws://localhost:8000/tunnel/connect?token=tb_xxx
+  const baseUrl = apiBaseUrl.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
+  const parsedBase = new URL(baseUrl);
+  const isLocal = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(parsedBase.hostname);
+  if (!isLocal && parsedBase.protocol !== 'https:') {
+    throw new Error('Refusing unencrypted tunnel connection to non-localhost API URL');
+  }
   const wsUrl =
-    apiBaseUrl.replace(/^http/, 'ws') + `/tunnel/connect?token=${encodeURIComponent(authToken)}`;
+    baseUrl.replace(/^http/, 'ws') + `/tunnel/connect?token=${encodeURIComponent(authToken)}`;
 
   return await new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);

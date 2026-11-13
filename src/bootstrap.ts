@@ -62,7 +62,7 @@ export async function bootstrap(opts: BootstrapOptions): Promise<CliContext> {
 
   const authStore = createFileAuthStore(authFilePath, fileStore);
 
-  const authService = createAuthService(apiClient, authStore, logger);
+  const authService = createAuthService(apiClient, authStore, logger, configService);
 
   const token = await authStore.get();
   if (token && isTokenValid(token)) {

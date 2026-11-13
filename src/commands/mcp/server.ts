@@ -1,9 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { existsSync } from 'fs';
-import { execSync } from 'child_process';
 import { z } from 'zod';
 import type { CliContext } from '../../types/context.js';
+import {
+  findChromiumBrowser,
+  launchChrome,
+  type LaunchedChrome,
+} from '../../infrastructure/browser/chrome.launcher.js';
 
 let activeWorkspaceId: string | null = null;
 let activeWorkspaceName: string | null = null;
@@ -65,7 +68,7 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
       if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- workspace shape not modeled client-side
-        const res = await api.get<any>(`/api/v1/workspaces/${workspace_id}`);
+        const res = await api.get<any>(`/api/v1/workspaces/${encodeURIComponent(workspace_id)}`);
         activeWorkspaceId = workspace_id;
         activeWorkspaceName = res.data?.name || workspace_id;
         return {
@@ -118,18 +121,13 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 
       // Normalize bare URLs — agents often omit the scheme (e.g. "localhost:3000")
       const normalizedUrl = /^https?:\/\//i.test(url) ? url : `http://${url}`;
-      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)/i.test(
-        normalizedUrl,
-      );
       let tunnelId: string | undefined;
       let cleanup: (() => Promise<void>) | undefined;
 
       try {
-        if (isLocalhost) {
-          const tunnel = await launchTunnel(ctx);
-          tunnelId = tunnel.tunnelId;
-          cleanup = tunnel.cleanup;
-        }
+        const tunnel = await launchTunnel(ctx);
+        tunnelId = tunnel.tunnelId;
+        cleanup = tunnel.cleanup;
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- verify-implementation response shape not modeled client-side
         const res = await api.post<any>(
@@ -173,6 +171,121 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
   );
 
   server.tool(
+    'verify_mobile_implementation',
+    'Verify a mobile app implementation against a specific natural language goal on a connected iOS simulator or Android emulator.',
+    {
+      goal: z
+        .string()
+        .min(1)
+        .describe('The natural language goal or criteria to verify on the mobile device'),
+      platform: z
+        .enum(['ios', 'android'])
+        .optional()
+        .describe('Mobile platform (ios or android). Auto-detected if omitted.'),
+      app_identifier: z
+        .string()
+        .optional()
+        .describe('App bundle ID (iOS) or package name (Android), e.g. com.example.app'),
+    },
+    async ({ goal, platform, app_identifier }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+      const { devices } = detectDevices();
+      if (!devices.length) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No running iOS simulator or Android emulator found. Please start a simulator (e.g. `open -a Simulator`) or emulator first.',
+            },
+          ],
+        };
+      }
+
+      const selectedDevice = platform
+        ? devices.find((d) => d.platform === platform) || devices[0]
+        : devices[0];
+      if (!selectedDevice) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'No running iOS simulator or Android emulator found.',
+            },
+          ],
+        };
+      }
+      const { startAppiumBridge } = await import('../../infrastructure/mobile/appium.bridge.js');
+      const token = ctx ? await ctx.infra.auth.getToken() : null;
+      if (!token?.accessToken) {
+        return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      }
+
+      const config = ctx?.infra.config
+        ? await ctx.infra.config.loadGlobalConfig()
+        : { apiUrl: 'http://localhost:8000' };
+      let bridge;
+      try {
+        bridge = await startAppiumBridge({
+          apiBaseUrl: config.apiUrl,
+          authToken: token.accessToken,
+          deviceId: selectedDevice.id,
+          platform: selectedDevice.platform,
+          deviceName: selectedDevice.name,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Failed to connect to mobile device via Appium: ${message}`,
+            },
+          ],
+        };
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mobile-start response shape
+        const res = await api.post<any>(
+          `/api/v1/workspaces/${activeWorkspaceId}/mcp/mobile-start`,
+          {
+            goal,
+            platform: selectedDevice.platform,
+            trigger_type: 'MCP',
+            device_name: selectedDevice.name,
+            session_id: bridge.sessionId,
+            app_identifier,
+          },
+          { timeout: 300_000 },
+        );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Mobile verification run initiated (ID: ${res.data?.run_id}). Target: ${selectedDevice.name} (${selectedDevice.platform.toUpperCase()}). Goal: "${goal}"`,
+            },
+          ],
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error starting mobile verification: ${message}` }],
+        };
+      } finally {
+        if (bridge) await bridge.close();
+      }
+    },
+  );
+
+  server.tool(
     'create_test',
     'Create a new, permanent test definition in the Traceback workspace.',
     {
@@ -209,6 +322,235 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape not modeled client-side
       } catch (err: any) {
         return { content: [{ type: 'text', text: `Error: ${err.message}` }] };
+      }
+    },
+  );
+
+  // ── Device Discovery Tool ────────────────────────────────
+  server.tool(
+    'list_devices',
+    'List all currently attached Android emulators, physical devices, and running iOS simulators available for mobile testing.',
+    {},
+    async () => {
+      const { detectDevices } = await import('../../infrastructure/mobile/device.detector.js');
+      const { devices, diagnostics } = detectDevices();
+      if (!devices.length) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                'No active mobile devices or emulators found.\n\nDiagnostics:\n' +
+                `• Android ADB: ${diagnostics.androidToolFound ? 'Ready' : 'Not found on PATH'}\n` +
+                `• iOS Simctl: ${diagnostics.iosToolFound ? 'Ready' : diagnostics.iosNeedsXcodeSelect ? 'Needs xcode-select pointing to Xcode.app' : 'Not found'}`,
+            },
+          ],
+        };
+      }
+
+      const lines = devices.map(
+        (d) => `• ${d.name} (${d.platform.toUpperCase()}) — ID: ${d.id} [${d.state}]`,
+      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Found ${devices.length} active device(s):\n${lines.join('\n')}`,
+          },
+        ],
+      };
+    },
+  );
+
+  // ── Test Catalog & Execution Tools ───────────────────────
+  server.tool(
+    'list_tests',
+    'List existing tests in the active Traceback workspace with optional search query or platform filter.',
+    {
+      query: z
+        .string()
+        .optional()
+        .describe('Optional search query to filter tests by name or goal'),
+      platform: z
+        .enum(['web', 'mobile', 'all'])
+        .optional()
+        .describe('Filter by platform (web, mobile, all)'),
+    },
+    async ({ query, platform }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tests list shape
+        const res = await api.get<any[]>(`/api/v1/workspaces/${activeWorkspaceId}/tests`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tests array shape
+        let tests: any[] = Array.isArray(res.data) ? res.data : (res.data as any)?.data || [];
+
+        if (platform && platform !== 'all') {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test object shape
+          tests = tests.filter((t: any) => (t.platform || 'web') === platform);
+        }
+
+        if (query) {
+          const q = query.toLowerCase();
+          tests = tests.filter(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test object shape
+            (t: any) =>
+              (t.name && t.name.toLowerCase().includes(q)) ||
+              (t.goal && t.goal.toLowerCase().includes(q)),
+          );
+        }
+
+        if (tests.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No matching tests found in this workspace.' }],
+          };
+        }
+
+        const lines = tests.map(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test object shape
+          (t: any) =>
+            `• ${t.name} (ID: ${t.id}) [${(t.platform || 'web').toUpperCase()}]\n  Goal: ${t.goal || t.definition || '—'}`,
+        );
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Found ${tests.length} test(s):\n\n${lines.join('\n\n')}`,
+            },
+          ],
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: `Error fetching tests: ${err.message}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'run_test',
+    'Trigger an execution run for an existing test definition in the active Traceback workspace.',
+    {
+      test_id: z.string().min(1).describe('The ID of the test to run'),
+      environment: z
+        .string()
+        .optional()
+        .default('production')
+        .describe('Target environment (e.g. production, staging)'),
+    },
+    async ({ test_id, environment }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      try {
+        const res = await api.post<{ run_id: string }>(
+          `/api/v1/workspaces/${activeWorkspaceId}/tests/${test_id}/run`,
+          { environment, viewport: 'desktop' },
+        );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- run response shape
+        const runId = res.data?.run_id || (res.data as any)?.id;
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Test run successfully triggered (Run ID: ${runId}). Environment: ${environment}. You can check progress using \`get_run_results\`.`,
+            },
+          ],
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: `Error triggering test run: ${err.message}` }] };
+      }
+    },
+  );
+
+  server.tool(
+    'get_run_results',
+    'Inspect the execution status, step logs, and error details of a specific test run.',
+    {
+      run_id: z.string().min(1).describe('The unique ID of the test run to inspect'),
+    },
+    async ({ run_id }) => {
+      if (!api) return { content: [{ type: 'text', text: 'Not authenticated.' }] };
+      if (!activeWorkspaceId) {
+        return {
+          content: [{ type: 'text', text: 'No workspace selected. Call select_workspace first.' }],
+        };
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- run response shape
+        const res = await api.get<any>(`/api/v1/workspaces/${activeWorkspaceId}/runs/${run_id}`);
+        const run = res.data;
+        const lines: string[] = [];
+
+        const statusIcon = run.status === 'passed' ? '✅' : run.status === 'failed' ? '❌' : '⏳';
+        lines.push(`${statusIcon} Run Status: ${String(run.status || 'unknown').toUpperCase()}`);
+        if (run.test_name || run.name) lines.push(`Test: ${run.test_name || run.name}`);
+        if (run.duration_seconds || run.duration_ms) {
+          const sec = run.duration_seconds || Math.round((run.duration_ms || 0) / 1000);
+          lines.push(`Duration: ${sec}s`);
+        }
+        if (run.error) lines.push(`Error: ${run.error}`);
+
+        if (Array.isArray(run.steps) && run.steps.length > 0) {
+          lines.push('\nExecuted Steps:');
+          for (const step of run.steps) {
+            const icon = step.status === 'passed' ? '✓' : step.status === 'failed' ? '✗' : '•';
+            lines.push(`  ${icon} ${step.action || step.description || step.name || 'Step'}`);
+            if (step.failure_reason || step.error) {
+              lines.push(`    → Reason: ${step.failure_reason || step.error}`);
+            }
+          }
+        }
+
+        return { content: [{ type: 'text', text: lines.join('\n') }] };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- axios error shape
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: `Error fetching run results: ${err.message}` }] };
+      }
+    },
+  );
+
+  // ── Diagnostics Tool ─────────────────────────────────────
+  server.tool(
+    'diagnose_environment',
+    'Run full diagnostics on the local and cloud Traceback setup (API connectivity, Appium, Android SDK, Xcode).',
+    {},
+    async () => {
+      if (!ctx?.services.doctor) {
+        return { content: [{ type: 'text', text: 'Diagnostics service unavailable.' }] };
+      }
+
+      try {
+        const results = await ctx.services.doctor.runDiagnostics();
+        const lines = results.map((r) => {
+          const icon = r.status === 'ok' ? '✔' : r.status === 'warning' ? '⚠' : '✖';
+          let out = `${icon} ${r.name}: ${r.message}`;
+          if (r.suggestion) out += ` (Fix: ${r.suggestion})`;
+          return out;
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Traceback Diagnostics Summary:\n\n${lines.join('\n')}`,
+            },
+          ],
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- error shape
+      } catch (err: any) {
+        return { content: [{ type: 'text', text: `Error running diagnostics: ${err.message}` }] };
       }
     },
   );
@@ -284,30 +626,35 @@ export async function startMcpServer(ctx: CliContext | undefined): Promise<void>
 async function launchTunnel(
   ctx: CliContext | undefined,
 ): Promise<{ tunnelId: string; cleanup: () => Promise<void> }> {
-  const { spawn } = await import('child_process');
   const { WebSocket } = await import('ws');
 
-  // Find Chrome
-  const chromePath = findChrome();
-  if (!chromePath)
-    throw new Error('Chrome not found. Install Google Chrome to use localhost verification.');
+  let launched: LaunchedChrome | null = null;
+  let cdpUrl = '';
 
-  // Launch Chrome with CDP
-  const chromeProc = spawn(
-    chromePath,
-    [
-      '--remote-debugging-port=9222',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--user-data-dir=/tmp/traceback-chrome-profile',
-      'about:blank',
-    ],
-    { stdio: 'ignore', detached: true },
-  );
+  // Check if a Chromium browser is already running on port 9222 with CDP
+  try {
+    const res = await fetch('http://127.0.0.1:9222/json/version');
+    if (res.ok) {
+      const data = (await res.json()) as { webSocketDebuggerUrl?: string };
+      if (data.webSocketDebuggerUrl) {
+        cdpUrl = data.webSocketDebuggerUrl;
+      }
+    }
+  } catch {}
 
-  await new Promise((r) => setTimeout(r, 2000));
+  // If not running, find and launch default or available Chromium browser
+  if (!cdpUrl) {
+    const browser = findChromiumBrowser();
+    if (!browser) {
+      throw new Error(
+        'No Chromium-based browser (Brave, Google Chrome, Microsoft Edge, Arc, Chromium) was found. Please install one to use local verification.',
+      );
+    }
+    launched = await launchChrome({ port: 9222 });
+    cdpUrl = launched.cdpUrl;
+  }
 
-  // Connect tunnel
+  // Connect tunnel to backend
   const baseUrl = ctx?.infra.api.getAxiosInstance().defaults.baseURL || 'http://localhost:8000';
   const auth = ctx ? await ctx.infra.auth.getToken() : null;
   const token = auth?.accessToken || '';
@@ -318,42 +665,29 @@ async function launchTunnel(
   const ws = new WebSocket(wsUrl);
 
   const tunnelId = await new Promise<string>((resolve, reject) => {
+    let pendingTunnelId = '';
     const timeout = setTimeout(() => reject(new Error('Tunnel connection timeout')), 10000);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ws message payload shape not modeled client-side
-    ws.on('message', async (raw: any) => {
-      const msg = JSON.parse(raw.toString());
-      if (msg.type === 'ready') {
-        clearTimeout(timeout);
-        try {
-          // Keep trying to fetch the CDP URL until Chrome is ready
-          let cdpUrl = '';
-          for (let i = 0; i < 10; i++) {
-            try {
-              const res = await fetch('http://127.0.0.1:9222/json/version');
-              if (res.ok) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- CDP /json/version response shape not modeled client-side
-                const data = (await res.json()) as any;
-                if (data && data.webSocketDebuggerUrl) {
-                  cdpUrl = data.webSocketDebuggerUrl;
-                  break;
-                }
-              }
-            } catch (e) {
-              await new Promise((r) => setTimeout(r, 500));
-            }
-          }
-          if (!cdpUrl) throw new Error('Could not get CDP URL from Chrome');
+
+    ws.on('message', async (raw: unknown) => {
+      try {
+        const rawStr = typeof raw === 'string' ? raw : String(raw);
+        const msg = JSON.parse(rawStr);
+        if (msg.type === 'ready') {
+          pendingTunnelId = msg.tunnel_id;
           ws.send(JSON.stringify({ type: 'cdp_ready', cdp_url: cdpUrl }));
-          resolve(msg.tunnel_id);
-        } catch (err) {
-          reject(err);
+        } else if (msg.type === 'cdp_ack') {
+          clearTimeout(timeout);
+          resolve(pendingTunnelId);
         }
+      } catch (err) {
+        clearTimeout(timeout);
+        reject(err);
       }
     });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ws error shape not modeled client-side
-    ws.on('error', (err: any) => {
+
+    ws.on('error', (err: unknown) => {
       clearTimeout(timeout);
-      reject(err);
+      reject(err instanceof Error ? err : new Error(String(err)));
     });
   });
 
@@ -361,32 +695,10 @@ async function launchTunnel(
     try {
       ws.close();
     } catch {}
-    try {
-      chromeProc.kill();
-    } catch {}
+    if (launched) {
+      launched.kill();
+    }
   };
 
   return { tunnelId, cleanup };
-}
-
-function findChrome(): string | null {
-  if (process.platform === 'darwin') {
-    const path = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-    if (existsSync(path)) return path;
-  } else if (process.platform === 'win32') {
-    for (const p of [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    ]) {
-      if (existsSync(p)) return p;
-    }
-  } else {
-    for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
-      try {
-        const p = execSync(`which ${name}`, { encoding: 'utf8' }).trim();
-        if (p) return p;
-      } catch {}
-    }
-  }
-  return null;
 }

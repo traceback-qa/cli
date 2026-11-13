@@ -17,9 +17,11 @@ export function createFileStore(): FileStore {
     writeJson(filePath: string, data: unknown): void {
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      fs.renameSync(tmpPath, filePath);
     },
 
     readText(filePath: string): string | null {
@@ -34,9 +36,11 @@ export function createFileStore(): FileStore {
     writeText(filePath: string, content: string): void {
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
-      fs.writeFileSync(filePath, content, { mode: 0o600 });
+      const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+      fs.writeFileSync(tmpPath, content, { mode: 0o600 });
+      fs.renameSync(tmpPath, filePath);
     },
 
     exists(filePath: string): boolean {

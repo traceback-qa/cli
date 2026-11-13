@@ -1,20 +1,25 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 
 function getMachineId(): string {
   try {
     switch (process.platform) {
       case 'darwin': {
-        const id = execSync(
-          "ioreg -rd1 -c IOPlatformExpertDevice | awk -F'\"' '/IOPlatformUUID/ {print $4}'",
-          {
-            encoding: 'utf-8',
-          },
-        ).trim();
-        return id;
+        const out = execFileSync('ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], {
+          encoding: 'utf-8',
+          timeout: 5_000,
+        });
+        const match = out.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+        return match?.[1]?.trim() || os.hostname();
       }
       case 'linux': {
-        const id = execSync('cat /etc/machine-id', { encoding: 'utf-8' }).trim();
-        return id || execSync('cat /var/lib/dbus/machine-id', { encoding: 'utf-8' }).trim();
+        for (const candidate of ['/etc/machine-id', '/var/lib/dbus/machine-id']) {
+          if (fs.existsSync(candidate)) {
+            const id = fs.readFileSync(candidate, 'utf-8').trim();
+            if (id) return id;
+          }
+        }
+        return os.hostname();
       }
       case 'win32': {
         return process.env.COMPUTERNAME ?? 'windows-machine';
@@ -83,5 +88,79 @@ export function decrypt(encryptedValue: string): string | null {
     return decrypted.toString('utf-8');
   } catch {
     return null;
+  }
+}
+
+// ── OS credential store ────────────────────────────────────────────────
+// macOS: Keychain via `security`. Linux: libsecret via `secret-tool`.
+// Other platforms (or when the tool is missing) report "unavailable" and
+// callers fall back to the encrypted file.
+
+const KEYCHAIN_SERVICE = 'traceback-cli';
+
+export type KeychainResult<T> = { available: false } | { available: true; value: T };
+
+function run(cmd: string, args: string[], input?: string): string | null {
+  try {
+    return execFileSync(cmd, args, {
+      encoding: 'utf-8',
+      input,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 10_000,
+    });
+  } catch {
+    return null;
+  }
+}
+
+export function keychainSupported(): boolean {
+  if (process.platform === 'darwin') return true;
+  if (process.platform === 'linux') return run('which', ['secret-tool']) !== null;
+  return false;
+}
+
+export function keychainSet(account: string, secret: string): boolean {
+  if (process.platform === 'darwin') {
+    // Pass via `security -i` stdin so the secret never appears in process argv (`ps`).
+    const escapedSecret = secret.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const cmdLine = `add-generic-password -U -s "${KEYCHAIN_SERVICE}" -a "${account}" -w "${escapedSecret}"\n`;
+    return run('security', ['-i'], cmdLine) !== null;
+  }
+  if (process.platform === 'linux' && keychainSupported()) {
+    return (
+      run(
+        'secret-tool',
+        ['store', '--label=Traceback CLI', 'service', KEYCHAIN_SERVICE, 'account', account],
+        secret,
+      ) !== null
+    );
+  }
+  return false;
+}
+
+export function keychainGet(account: string): KeychainResult<string | null> {
+  if (process.platform === 'darwin') {
+    const out = run('security', [
+      'find-generic-password',
+      '-s',
+      KEYCHAIN_SERVICE,
+      '-a',
+      account,
+      '-w',
+    ]);
+    return { available: true, value: out ? out.trim() : null };
+  }
+  if (process.platform === 'linux' && keychainSupported()) {
+    const out = run('secret-tool', ['lookup', 'service', KEYCHAIN_SERVICE, 'account', account]);
+    return { available: true, value: out ? out.trim() : null };
+  }
+  return { available: false };
+}
+
+export function keychainDelete(account: string): void {
+  if (process.platform === 'darwin') {
+    run('security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account]);
+  } else if (process.platform === 'linux' && keychainSupported()) {
+    run('secret-tool', ['clear', 'service', KEYCHAIN_SERVICE, 'account', account]);
   }
 }
